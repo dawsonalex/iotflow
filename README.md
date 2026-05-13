@@ -52,7 +52,7 @@ import (
 
 func main() {
     // Auto-discovers the first available WiFi device.
-    p, err := iotflow.NewProvisioner()
+    p, err := iotflow.NewNmProvisioner()
     if err != nil {
         log.Fatal(err)
     }
@@ -112,7 +112,7 @@ func main() {
 If your device has multiple WiFi adapters, or you want to pin to a known interface name:
 
 ```go
-p, err := iotflow.NewProvisioner(iotflow.WithInterface("wlan0"))
+p, err := iotflow.NewNmProvisioner(iotflow.WithInterface("wlan0"))
 ```
 
 ### Reading state updates
@@ -131,7 +131,8 @@ A `Failed` update always carries a non-nil `Err`. `Connected` signals success an
 ## API
 
 ```
-NewProvisioner(opts ...Option) (*Provisioner, error)
+NewNmProvisioner(opts ...Option) (*Provisioner, error)
+NewProvisioner(backend Backend) *Provisioner
 WithInterface(iface string) Option
 
 (*Provisioner).IsConnected(ctx context.Context) (bool, error)
@@ -164,4 +165,18 @@ polkit.addRule(function(action, subject) {
 
 ## Extending with a custom backend
 
-The NetworkManager implementation is one backend. To support a different system (e.g. `wpa_supplicant`), implement the unexported `backend` interface and wire it up with a new constructor. The `Provisioner` type and all provisioning logic are backend-agnostic.
+The NetworkManager implementation is one backend. To support a different system (e.g. `wpa_supplicant`), implement the exported `Backend` interface and pass it to `NewProvisioner`:
+
+```go
+type Backend interface {
+    IsConnected(ctx context.Context) (bool, error)
+    EnableAPMode(ctx context.Context, ssid, psk string) (<-chan ProvisionUpdate, error)
+    DisableAPMode() error
+    ConnectToNetwork(ctx context.Context, ssid, psk string) (<-chan ProvisionUpdate, error)
+    Close() error
+}
+
+p := iotflow.NewProvisioner(myBackend)
+```
+
+The `Provisioner` type and all provisioning logic are backend-agnostic.
