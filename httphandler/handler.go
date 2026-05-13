@@ -84,7 +84,7 @@ func (h *handler) handleEnableApMode() http.HandlerFunc {
 				http.Error(rw, err.Error(), http.StatusBadRequest)
 
 				// Re-assign the error here so that the wrapped error is passed to onError
-				err = fmt.Errorf("%w: %s", ValidationError, err)
+				err = fmt.Errorf("%w: %w", ValidationError, err)
 			} else {
 				http.Error(rw, err.Error(), http.StatusInternalServerError)
 			}
