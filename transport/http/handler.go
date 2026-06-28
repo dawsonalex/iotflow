@@ -6,11 +6,17 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/dawsonalex/iotflow"
 )
 
 var ErrValidation = errors.New("validation error")
+
+// defaultKeepalive is how often an idle SSE stream emits a heartbeat comment.
+// A provisioning flow can sit in StateWaitingForCredentials indefinitely with no
+// updates, so without this the connection looks dead to proxies and NATs.
+const defaultKeepalive = 15 * time.Second
 
 type errHandler func(r *http.Request, err error)
 
@@ -21,10 +27,11 @@ type Flow interface {
 }
 
 type handler struct {
-	flow    Flow
-	addr    string
-	ln      net.Listener // when set, used in place of binding addr
-	onError errHandler
+	flow      Flow
+	addr      string
+	ln        net.Listener // when set, used in place of binding addr
+	onError   errHandler
+	keepalive time.Duration // SSE heartbeat interval; see defaultKeepalive
 }
 
 type credentialsRequest struct {
@@ -63,10 +70,14 @@ func (h *handler) handlePostCredentials() http.HandlerFunc {
 
 func (h *handler) handleGetEvents() http.HandlerFunc {
 	return func(rw http.ResponseWriter, r *http.Request) {
-		// TODO: Check how this works with context timeouts, and in general how to stop the subscription.
+		// The subscription is torn down on every exit path: a client disconnect
+		// cancels r.Context() (which doSseResponse selects on) and the deferred
+		// Unsubscribe runs; when the Flow finishes it closes ch itself, so
+		// doSseResponse returns and Unsubscribe safely no-ops on the already
+		// removed channel.
 		ch := h.flow.Subscribe()
 		defer h.flow.Unsubscribe(ch)
-		doSseResponse(rw, r, ch, h.onError)
+		doSseResponse(rw, r, ch, h.keepalive, h.onError)
 	}
 }
 
@@ -78,7 +89,7 @@ func (h *handler) mux() *http.ServeMux {
 }
 
 func NewHandler(f Flow, opts ...HandlerOpt) http.Handler {
-	h := &handler{flow: f}
+	h := &handler{flow: f, keepalive: defaultKeepalive}
 
 	for _, o := range opts {
 		o(h)

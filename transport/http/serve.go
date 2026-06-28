@@ -15,7 +15,7 @@ import (
 // the first of them finishes, or ctx is cancelled. The server is bound to :80
 // by default.
 func Serve(ctx context.Context, f *iotflow.Flow, opts ...HandlerOpt) error {
-	h := &handler{flow: f, addr: ":80"}
+	h := &handler{flow: f, addr: ":80", keepalive: defaultKeepalive}
 	for _, o := range opts {
 		o(h)
 	}

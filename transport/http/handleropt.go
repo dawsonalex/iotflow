@@ -3,12 +3,20 @@ package http
 import (
 	"net"
 	"net/http"
+	"time"
 )
 
 type HandlerOpt func(h *handler)
 
 func WithErrorHandler(f func(r *http.Request, err error)) HandlerOpt {
 	return func(h *handler) { h.onError = f }
+}
+
+// WithKeepalive sets how often an idle SSE stream emits a heartbeat comment to
+// keep the connection alive through proxies and to surface a dead client on the
+// next write. A non-positive d disables heartbeats. Defaults to defaultKeepalive.
+func WithKeepalive(d time.Duration) HandlerOpt {
+	return func(h *handler) { h.keepalive = d }
 }
 
 func WithAddress(addr string) HandlerOpt {
