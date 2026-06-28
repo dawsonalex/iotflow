@@ -18,7 +18,7 @@ import (
 // Begin (and therefore Serve) can return — exactly what the shutdown path tests.
 func newWaitingFlow(t *testing.T) *iotflow.Flow {
 	t.Helper()
-	f, err := iotflow.NewFlow(&iotflowtest.MockProvisioner{
+	f, err := iotflow.NewFlow("test", "password", &iotflowtest.MockProvisioner{
 		IsConnectedFn: func(_ context.Context) (bool, error) { return false, nil },
 		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan iotflow.ProvisionUpdate, error) {
 			return iotflowtest.ConnectedCh(), nil

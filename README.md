@@ -57,6 +57,22 @@ reported. Credentials arrive through `Submit` and progress is observed through
 
 ### Driving a Flow directly
 
+There are two ways to construct a `Flow`, differing only in who owns the
+backend's lifecycle:
+
+- **`NewNetworkManagerFlow`** — a convenience constructor that builds a
+  `NetworkManagerProvisioner` internally. The `Flow` *owns* that backend, so
+  `Finish` closes it for you.
+- **`NewFlow`** — you supply your own `Provisioner`. The `Flow` does **not** take
+  ownership; you are responsible for closing the provisioner yourself (typically
+  with `defer p.Close()`). Use this for a custom backend or a provisioner shared
+  across flows.
+
+Both take the device's own AP credentials (`apSSID`, `apPSK`) up front; they are
+validated before anything else happens.
+
+#### Managed backend (recommended)
+
 ```go
 package main
 
@@ -68,20 +84,14 @@ import (
 )
 
 func main() {
-    // The NetworkManager backend. Pass "" to auto-discover the first WiFi
-    // device, or an interface name (e.g. "wlan0") to pin to a specific adapter.
-    p, err := iotflow.NewNetworkManagerProvisioner("wlan0")
+    // Builds the NetworkManager backend internally. Pass "" for the interface
+    // to auto-discover the first WiFi device, or a name (e.g. "wlan0") to pin to
+    // a specific adapter. The Flow owns this backend.
+    f, err := iotflow.NewNetworkManagerFlow("iotflow-setup", "setup-password", "wlan0")
     if err != nil {
         log.Fatal(err)
     }
-    defer p.Close()
-
-    // A Flow orchestrates the whole lifecycle on top of the backend.
-    f, err := iotflow.NewFlow(p)
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer f.Finish()
+    defer f.Finish() // closes the backend the Flow created
 
     // Observe state transitions. Subscribe before Begin so no updates are missed.
     go func() {
@@ -112,6 +122,31 @@ func main() {
 }
 ```
 
+#### Bring your own Provisioner
+
+When you construct the `Provisioner` yourself and pass it to `NewFlow`, the
+`Flow` will not close it — so you must manage its lifecycle. Note the extra
+`defer p.Close()`:
+
+```go
+func main() {
+    p, err := iotflow.NewNetworkManagerProvisioner("wlan0")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer p.Close() // you created the provisioner, so you close it
+
+    // NewFlow does not take ownership of p; Finish leaves it untouched.
+    f, err := iotflow.NewFlow("iotflow-setup", "setup-password", p)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer f.Finish()
+
+    // ... Subscribe / Submit / Begin exactly as above.
+}
+```
+
 ### Exposing a Flow over HTTP
 
 The `transport/http` subpackage runs an HTTP server alongside a `Flow`. It serves
@@ -135,13 +170,7 @@ import (
 )
 
 func main() {
-    p, err := iotflow.NewNetworkManagerProvisioner("wlan0")
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer p.Close()
-
-    f, err := iotflow.NewFlow(p)
+    f, err := iotflow.NewNetworkManagerFlow("iotflow-setup", "setup-password", "wlan0")
     if err != nil {
         log.Fatal(err)
     }
@@ -209,14 +238,20 @@ interface is looked up and verified to be a WiFi adapter.
 ### Flow
 
 ```
-NewFlow(p Provisioner, opts ...FlowOpt) (*Flow, error)
+NewNetworkManagerFlow(apSSID, apPSK, iface string, opts ...FlowOpt) (*Flow, error) // managed backend; Finish closes it
+NewFlow(apSSID, apPSK string, p Provisioner, opts ...FlowOpt) (*Flow, error)       // bring your own Provisioner; you close it
 
 (*Flow).Begin(ctx context.Context) error       // runs the lifecycle; call once, blocks until terminal
 (*Flow).Submit(ssid, psk string) error         // hand station credentials to the running Flow
 (*Flow).Subscribe() <-chan FlowUpdate           // observe state transitions
 (*Flow).Unsubscribe(ch <-chan FlowUpdate)       // release a subscription early
-(*Flow).Finish() error                          // tear down (closes the backend)
+(*Flow).Finish() error                          // tear down; closes the backend only if the Flow created it
 ```
+
+`apSSID`/`apPSK` are the credentials for the device's own access point and are
+validated up front. `Finish` closes the backend only when the `Flow` created it
+(via `NewNetworkManagerFlow`); a `Provisioner` you passed to `NewFlow` remains
+yours to close.
 
 ### HTTP transport (`transport/http`)
 
@@ -242,10 +277,6 @@ network call):
 - SSID: 1–32 characters
 - PSK: 8–63 characters
 
-> **Note:** AP credentials are configured via `FlowOpt`s passed to `NewFlow`.
-> Until an option for them is wired up, the device's AP is brought up with empty
-> credentials — pin your AP SSID/PSK once the corresponding `FlowOpt` lands.
-
 ## Permissions
 
 Network operations require permission to talk to NetworkManager over D-Bus. The simplest approach during development is `sudo`. For production, create a PolicyKit rule that grants your service account the required permissions without running as root:
@@ -267,11 +298,13 @@ polkit.addRule(function(action, subject) {
 
 The NetworkManager implementation is one backend. To support a different system
 (e.g. `wpa_supplicant`), implement the exported `Provisioner` interface and pass
-it to `NewFlow`:
+it to `NewFlow`. Because you constructed the backend, you own its lifecycle — the
+`Flow` will not close it for you:
 
 ```go
 p := myCustomBackend{}
-f, err := iotflow.NewFlow(p)
+f, err := iotflow.NewFlow("iotflow-setup", "setup-password", p)
+// ... if p needs cleanup, defer p.Close() yourself.
 ```
 
 The `Flow` type and all provisioning logic are backend-agnostic.

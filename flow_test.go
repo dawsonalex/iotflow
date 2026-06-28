@@ -48,7 +48,7 @@ func stateSeq(updates []iotflow.FlowUpdate) []iotflow.FlowState {
 // newTestFlow creates a Flow backed by p.
 func newTestFlow(t *testing.T, p iotflow.Provisioner) *iotflow.Flow {
 	t.Helper()
-	f, err := iotflow.NewFlow(p)
+	f, err := iotflow.NewFlow("test", "password", p)
 	assert.NoError(t, err)
 	return f
 }
@@ -273,4 +273,216 @@ func TestSubscribe_AfterCompletionIsClosed(t *testing.T) {
 	ch := f.Subscribe()
 	_, ok := <-ch
 	assert.False(t, ok)
+}
+
+func TestUnsubscribe_ReleasesChannel(t *testing.T) {
+	f := newTestFlow(t, &iotflowtest.MockProvisioner{})
+
+	ch := f.Subscribe()
+	f.Unsubscribe(ch)
+
+	// An unsubscribed channel is closed, so a receive returns the zero value
+	// with ok == false rather than blocking.
+	_, ok := <-ch
+	assert.False(t, ok)
+}
+
+func TestUnsubscribe_UnknownChannelIsNoop(t *testing.T) {
+	f := newTestFlow(t, &iotflowtest.MockProvisioner{})
+
+	// Unsubscribing a channel the Flow never handed out must not panic or close
+	// anything; likewise a second Unsubscribe of an already-released channel.
+	other := make(chan iotflow.FlowUpdate)
+	assert.NotPanics(t, func() { f.Unsubscribe(other) })
+
+	ch := f.Subscribe()
+	f.Unsubscribe(ch)
+	assert.NotPanics(t, func() { f.Unsubscribe(ch) })
+}
+
+// --- Provisioner ownership (Finish) ---
+
+func TestFinish_BorrowedProvisionerNotClosed(t *testing.T) {
+	var closed atomic.Bool
+	// newTestFlow builds the Flow via NewFlow, so the provisioner is borrowed:
+	// Finish must leave it for the caller to close.
+	f := newTestFlow(t, &iotflowtest.MockProvisioner{
+		CloseFn: func() error { closed.Store(true); return nil },
+	})
+
+	assert.NoError(t, f.Finish())
+	assert.False(t, closed.Load(), "Finish must not close a Provisioner it does not own")
+}
+
+// --- NewFlow credential validation ---
+
+func TestNewFlow_InvalidAPCredentials(t *testing.T) {
+	_, err := iotflow.NewFlow("", testNetPSK, &iotflowtest.MockProvisioner{})
+	assert.ErrorIs(t, err, iotflow.ErrSSIDInvalid)
+
+	_, err = iotflow.NewFlow(testNetSSID, "short", &iotflowtest.MockProvisioner{})
+	assert.ErrorIs(t, err, iotflow.ErrPSKInvalid)
+}
+
+// --- Begin: ConnectToNetwork synchronous-error paths ---
+
+// TestBegin_RetryOnConnectError covers the branch where ConnectToNetwork returns
+// an error directly (flow.go's StateConnecting error return), as opposed to a
+// Failed update arriving on the channel — the latter is covered by
+// TestBegin_RetryOnConnectionFailure.
+func TestBegin_RetryOnConnectError(t *testing.T) {
+	connErr := errors.New("activation failed")
+	var callCount atomic.Int32
+
+	f := newTestFlow(t, &iotflowtest.MockProvisioner{
+		IsConnectedFn: func(_ context.Context) (bool, error) { return false, nil },
+		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan iotflow.ProvisionUpdate, error) {
+			return iotflowtest.ConnectedCh(), nil
+		},
+		ConnectToNetworkFn: func(_ context.Context, _, _ string) (<-chan iotflow.ProvisionUpdate, error) {
+			if callCount.Add(1) == 1 {
+				return nil, connErr // first attempt fails synchronously
+			}
+			return iotflowtest.ConnectedCh(), nil
+		},
+	})
+
+	results, waiting := watchUpdates(t, f.Subscribe(), iotflow.StateWaitingForCredentials)
+
+	beginErr := make(chan error, 1)
+	go func() { beginErr <- f.Begin(t.Context()) }()
+
+	<-waiting
+	assert.NoError(t, f.Submit(testNetSSID, "wrongpass1"))
+
+	<-waiting
+	assert.NoError(t, f.Submit(testNetSSID, testNetPSK))
+
+	assert.NoError(t, <-beginErr)
+	assert.Equal(t, []iotflow.FlowState{
+		iotflow.StateCheckingConnection,
+		iotflow.StateEnablingAP,
+		iotflow.StateWaitingForCredentials,
+		iotflow.StateDisablingAP,
+		iotflow.StateConnecting,
+		iotflow.StateEnablingAP, // retry loop
+		iotflow.StateWaitingForCredentials,
+		iotflow.StateDisablingAP,
+		iotflow.StateConnecting,
+		iotflow.StateProvisioned,
+	}, stateSeq(<-results))
+}
+
+// TestBegin_ContextCancelledDuringConnect covers cancellation on the synchronous
+// ConnectToNetwork error path: when ctx is already cancelled, the Flow must fail
+// with ctx.Err() rather than looping back into AP mode.
+func TestBegin_ContextCancelledDuringConnect(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+
+	f := newTestFlow(t, &iotflowtest.MockProvisioner{
+		IsConnectedFn: func(_ context.Context) (bool, error) { return false, nil },
+		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan iotflow.ProvisionUpdate, error) {
+			return iotflowtest.ConnectedCh(), nil
+		},
+		ConnectToNetworkFn: func(_ context.Context, _, _ string) (<-chan iotflow.ProvisionUpdate, error) {
+			cancel()
+			return nil, errors.New("activation failed")
+		},
+	})
+
+	results, waiting := watchUpdates(t, f.Subscribe(), iotflow.StateWaitingForCredentials)
+
+	beginErr := make(chan error, 1)
+	go func() { beginErr <- f.Begin(ctx) }()
+
+	<-waiting
+	assert.NoError(t, f.Submit(testNetSSID, testNetPSK))
+
+	err := <-beginErr
+	assert.ErrorIs(t, err, context.Canceled)
+
+	updates := <-results
+	last := updates[len(updates)-1]
+	assert.Equal(t, iotflow.StateFailed, last.State)
+	assert.ErrorIs(t, last.Err, context.Canceled)
+}
+
+// TestBegin_ContextCancelledDuringConnectChannel covers the same cancellation
+// guarantee on the channel path: ConnectToNetwork succeeds but its update channel
+// never reaches a terminal state, and ctx is cancelled while draining it.
+func TestBegin_ContextCancelledDuringConnectChannel(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	blocked := make(chan iotflow.ProvisionUpdate) // never sends, never closes
+
+	f := newTestFlow(t, &iotflowtest.MockProvisioner{
+		IsConnectedFn: func(_ context.Context) (bool, error) { return false, nil },
+		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan iotflow.ProvisionUpdate, error) {
+			return iotflowtest.ConnectedCh(), nil
+		},
+		ConnectToNetworkFn: func(_ context.Context, _, _ string) (<-chan iotflow.ProvisionUpdate, error) {
+			return blocked, nil
+		},
+	})
+
+	results, waiting := watchUpdates(t, f.Subscribe(), iotflow.StateConnecting)
+
+	beginErr := make(chan error, 1)
+	go func() { beginErr <- f.Begin(ctx) }()
+
+	assert.NoError(t, f.Submit(testNetSSID, testNetPSK))
+
+	<-waiting // Flow is now blocked draining the connect channel
+	cancel()
+
+	err := <-beginErr
+	assert.ErrorIs(t, err, context.Canceled)
+
+	updates := <-results
+	last := updates[len(updates)-1]
+	assert.Equal(t, iotflow.StateFailed, last.State)
+	assert.ErrorIs(t, last.Err, context.Canceled)
+}
+
+// TestBegin_DropsStaleCredentialsOnRetry verifies the drainCreds step: a
+// credential that arrives mid-connect must be discarded on retry rather than
+// silently reused, so the next connection uses fresh credentials.
+func TestBegin_DropsStaleCredentialsOnRetry(t *testing.T) {
+	connErr := errors.New("authentication failed")
+	var callCount atomic.Int32
+	var secondConnectSSID string
+
+	var f *iotflow.Flow
+	f = newTestFlow(t, &iotflowtest.MockProvisioner{
+		IsConnectedFn: func(_ context.Context) (bool, error) { return false, nil },
+		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan iotflow.ProvisionUpdate, error) {
+			return iotflowtest.ConnectedCh(), nil
+		},
+		ConnectToNetworkFn: func(_ context.Context, ssid, _ string) (<-chan iotflow.ProvisionUpdate, error) {
+			if callCount.Add(1) == 1 {
+				// A stale credential arrives while the first connect is in
+				// flight; the retry must drop it instead of reusing it.
+				_ = f.Submit("stale-net", "stalepassword")
+				return iotflowtest.FailedCh(connErr), nil
+			}
+			secondConnectSSID = ssid
+			return iotflowtest.ConnectedCh(), nil
+		},
+	})
+
+	_, waiting := watchUpdates(t, f.Subscribe(), iotflow.StateWaitingForCredentials)
+
+	beginErr := make(chan error, 1)
+	go func() { beginErr <- f.Begin(t.Context()) }()
+
+	<-waiting
+	assert.NoError(t, f.Submit(testNetSSID, testNetPSK))
+
+	// Second wait: by now the retry has run drainCreds, so the stale submission
+	// is gone and the Flow is blocked waiting for a fresh credential.
+	<-waiting
+	assert.NoError(t, f.Submit("fresh-net", "freshpassword"))
+
+	assert.NoError(t, <-beginErr)
+	assert.Equal(t, "fresh-net", secondConnectSSID,
+		"retry must use the freshly submitted credential, not the stale mid-connect one")
 }

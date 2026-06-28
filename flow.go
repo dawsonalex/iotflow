@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 )
 
@@ -89,9 +90,10 @@ var ErrSubmissionPending = errors.New("a credential submission is already pendin
 // adapts those two seams to HTTP, BLE, MQTT, etc. The Flow itself knows nothing
 // about how credentials reach it or how updates are delivered.
 type Flow struct {
-	provisioner Provisioner
-	apSSID      string
-	apPSK       string
+	ownsProvisioner bool // indicates whether Flow owns the lifecycle of the provisioner
+	provisioner     Provisioner
+	apSSID          string
+	apPSK           string
 
 	credsCh chan credentials // Submit → state machine
 
@@ -100,25 +102,47 @@ type Flow struct {
 	closed bool                         // true once Begin has returned
 }
 
-//NewFlow returns a Flow that provisions through p. apSSID and apPSK are the
-//credentials for the device's own AP, validated up front.
-//func NewFlow(p Provisioner, apSSID, apPSK string) (*Flow, error) {
-//	if err := validateCredentials(apSSID, apPSK); err != nil {
-//		return nil, err
-//	}
-//	return &Flow{
-//		provisioner: p,
-//		apSSID:      apSSID,
-//		apPSK:       apPSK,
-//		credsCh:     make(chan credentials, 1),
-//		subs:        make(map[chan FlowUpdate]struct{}),
-//	}, nil
-//}
-
 type FlowOpt func(*Flow)
 
-func NewFlow(p Provisioner, opts ...FlowOpt) (*Flow, error) {
+// NewNetworkManagerFlow creates a new flow for the network manager. apSsid and apPsk set ssid and password for
+// the flows AP mode. iface is the name of the network interface to use.
+// Make sure to call Finish on the flow to release resources.
+func NewNetworkManagerFlow(apSsid, apPsk, iface string, opts ...FlowOpt) (*Flow, error) {
+	if err := validateCredentials(apSsid, apPsk); err != nil {
+		return nil, err
+	}
+
+	p, err := NewNetworkManagerProvisioner(iface)
+	if err != nil {
+		return nil, fmt.Errorf("creating network manager provisioner for flow: %w", err)
+	}
+
 	f := &Flow{
+		ownsProvisioner: true,
+		apSSID:          apSsid,
+		apPSK:           apPsk,
+		provisioner:     p,
+		credsCh:         make(chan credentials, 1),
+		subs:            make(map[chan FlowUpdate]struct{}),
+	}
+
+	for _, o := range opts {
+		o(f)
+	}
+	return f, nil
+}
+
+// NewFlow creates a new flow for Provisioner p. apSsid and apPsk set ssid and password for
+// the flows AP mode.
+// Make sure to call Finish on the flow
+func NewFlow(apSsid, apPsk string, p Provisioner, opts ...FlowOpt) (*Flow, error) {
+	if err := validateCredentials(apSsid, apPsk); err != nil {
+		return nil, err
+	}
+
+	f := &Flow{
+		apSSID:      apSsid,
+		apPSK:       apPsk,
 		provisioner: p,
 		credsCh:     make(chan credentials, 1),
 		subs:        make(map[chan FlowUpdate]struct{}),
@@ -265,7 +289,11 @@ func (f *Flow) Begin(ctx context.Context) error {
 
 func (f *Flow) Finish() error {
 	// TODO: Probably need to also close other things here (server, etc)
-	return f.provisioner.Close()
+	if f.ownsProvisioner {
+		return f.provisioner.Close()
+	}
+
+	return nil
 }
 
 // emit fans an update out to all subscribers without blocking the state

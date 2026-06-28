@@ -24,16 +24,15 @@ type NetworkManagerProvisioner struct {
 	activeConn dbus.ObjectPath
 }
 
+// NewNetworkManagerProvisioner creates a new Provisioner that operates on NetworkManager over DBus.
+// The returned provisioner must be closed by the caller when provisioning is complete by
+// calling `Close()` on the returned Provisioner.
 func NewNetworkManagerProvisioner(iface string) (*NetworkManagerProvisioner, error) {
 	conn, err := dbus.SystemBus()
 	if err != nil {
 		return nil, fmt.Errorf("connecting to system bus: %w", err)
 	}
-	defer func() {
-		_ = conn.Close()
-	}()
 
-	// TODO: This needs moving to a new 'begin'/'validate' style hook that provisioners run.
 	var path dbus.ObjectPath
 	if iface == "" {
 		path, err = firstWiFiDevice(conn)
