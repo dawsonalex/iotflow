@@ -97,9 +97,11 @@ type Flow struct {
 
 	credsCh chan credentials // Submit → state machine
 
-	mu     sync.Mutex                   // guards subs and closed
-	subs   map[chan FlowUpdate]struct{} // active update subscribers
-	closed bool                         // true once Begin has returned
+	mu       sync.Mutex                   // guards subs, closed, last and hasState
+	subs     map[chan FlowUpdate]struct{} // active update subscribers
+	closed   bool                         // true once Begin has returned
+	last     FlowUpdate                   // most recent emitted update; replayed to new subscribers
+	hasState bool                         // true once at least one update has been emitted
 }
 
 type FlowOpt func(*Flow)
@@ -174,7 +176,14 @@ func (f *Flow) Submit(ssid, psk string) error {
 // transition. Multiple subscribers may observe concurrently. The channel is
 // buffered; if a subscriber falls behind, updates are dropped rather than
 // blocking the state machine. Every channel is closed when Begin returns.
-// Subscribing after Begin has returned yields an already-closed channel.
+//
+// Once the Flow has begun, the current state is replayed as the first update on
+// the returned channel, so a subscriber that joins mid-flow immediately learns
+// where the Flow is rather than only seeing future transitions. A subscriber
+// that joins before Begin (no state emitted yet) receives no such replay; its
+// first update is the first real transition. Subscribing after Begin has
+// returned yields the terminal state followed by a close, so a late subscriber
+// still learns the outcome.
 //
 // Call Unsubscribe to release a subscription early (e.g. when an SSE client
 // disconnects); otherwise it is released when Begin returns.
@@ -182,7 +191,14 @@ func (f *Flow) Subscribe() <-chan FlowUpdate {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	// Replay the current state into the buffer. The channel is freshly created
+	// with spare capacity, so this send never blocks. Holding mu makes the
+	// replay-and-register atomic with emit: a subscriber can neither miss a
+	// transition nor receive the current state twice.
 	ch := make(chan FlowUpdate, 16)
+	if f.hasState {
+		ch <- f.last
+	}
 	if f.closed {
 		close(ch)
 		return ch
@@ -301,6 +317,8 @@ func (f *Flow) Finish() error {
 func (f *Flow) emit(u FlowUpdate) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.last = u
+	f.hasState = true
 	for c := range f.subs {
 		select {
 		case c <- u:

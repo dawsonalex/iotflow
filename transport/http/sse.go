@@ -12,8 +12,6 @@ func doSseResponse[T any](rw http.ResponseWriter, r *http.Request, tChan <-chan 
 	rw.Header().Set("Content-Type", "text/event-stream")
 	rw.Header().Set("Cache-Control", "no-cache")
 
-	// TODO: This only sends future events. For clients that sub after a flow starts, we should track either the
-	// last or all previous state evnets so the client knows where they're at.
 	for {
 		select {
 		case <-r.Context().Done():

@@ -268,10 +268,16 @@ func TestSubscribe_AfterCompletionIsClosed(t *testing.T) {
 
 	assert.NoError(t, f.Begin(t.Context()))
 
-	// Begin has returned; new subscriptions must be already-closed so callers
-	// (e.g. a late SSE client) don't block forever.
+	// Begin has returned; a late subscriber (e.g. an SSE client that connects
+	// after provisioning finished) receives the terminal state once and then a
+	// close, so it learns the outcome without blocking forever.
 	ch := f.Subscribe()
-	_, ok := <-ch
+
+	upd, ok := <-ch
+	assert.True(t, ok)
+	assert.Equal(t, iotflow.StateConnected, upd.State)
+
+	_, ok = <-ch
 	assert.False(t, ok)
 }
 
