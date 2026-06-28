@@ -12,7 +12,7 @@ import (
 )
 
 // Serve runs the provisioning HTTP server and the Flow together, returning when
-// the first of them finishes, or ctx is canceled. The server is bound to :80
+// the first of them finishes, or ctx is cancelled. The server is bound to :80
 // by default.
 func Serve(ctx context.Context, f *iotflow.Flow, opts ...HandlerOpt) error {
 	h := &handler{flow: f, addr: ":80"}
