@@ -15,47 +15,50 @@ const (
 	nmObjectPath = "/org/freedesktop/NetworkManager"
 )
 
-type nmBackend struct {
+var _ Provisioner = &NetworkManagerProvisioner{}
+
+// NetworkManagerProvisioner is a provisioner that uses NetworkManager as a backend.
+type NetworkManagerProvisioner struct {
 	conn       *dbus.Conn
 	ifacePath  dbus.ObjectPath
 	activeConn dbus.ObjectPath
 }
 
-func newNMBackend(cfg *provisionerConfig) (*nmBackend, error) {
+func NewNetworkManagerProvisioner(iface string) (*NetworkManagerProvisioner, error) {
 	conn, err := dbus.SystemBus()
 	if err != nil {
 		return nil, fmt.Errorf("connecting to system bus: %w", err)
 	}
+	defer func() {
+		_ = conn.Close()
+	}()
 
+	// TODO: This needs moving to a new 'begin'/'validate' style hook that provisioners run.
 	var path dbus.ObjectPath
-	if cfg.iface == "" {
+	if iface == "" {
 		path, err = firstWiFiDevice(conn)
 		if err != nil {
-			conn.Close()
 			return nil, fmt.Errorf("auto-discovering WiFi device: %w", err)
 		}
 	} else {
-		path, err = deviceByIface(conn, cfg.iface)
+		path, err = deviceByIface(conn, iface)
 		if err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("looking up interface %q: %w", cfg.iface, err)
+			return nil, fmt.Errorf("looking up interface %q: %w", iface, err)
 		}
 
 		t, err := getDeviceType(conn, path)
 		if err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("checking device type for %q: %w", cfg.iface, err)
+			return nil, fmt.Errorf("checking device type for %q: %w", iface, err)
 		}
 		if t != deviceTypeWifi {
-			conn.Close()
-			return nil, fmt.Errorf("%q is not a WiFi device (got %s)", cfg.iface, t)
+			return nil, fmt.Errorf("%q is not a WiFi device (got %s)", iface, t)
 		}
 	}
 
-	return &nmBackend{conn: conn, ifacePath: path}, nil
+	return &NetworkManagerProvisioner{conn: conn, ifacePath: path}, nil
 }
 
-func (b *nmBackend) IsConnected(_ context.Context) (bool, error) {
+func (b *NetworkManagerProvisioner) IsConnected(_ context.Context) (bool, error) {
 	state, err := getDeviceState(b.conn, b.ifacePath)
 	if err != nil {
 		return false, err
@@ -63,7 +66,11 @@ func (b *nmBackend) IsConnected(_ context.Context) (bool, error) {
 	return state == nmDeviceStateActivated, nil
 }
 
-func (b *nmBackend) EnableAPMode(ctx context.Context, ssid, psk string) (<-chan ProvisionUpdate, error) {
+func (b *NetworkManagerProvisioner) EnableAPMode(ctx context.Context, ssid, psk string) (<-chan ProvisionUpdate, error) {
+	if err := validateCredentials(ssid, psk); err != nil {
+		return nil, err
+	}
+
 	settings := connectionSettings{
 		"connection": {
 			"id":          dbus.MakeVariant(ssid + "-ap"),
@@ -93,7 +100,7 @@ func (b *nmBackend) EnableAPMode(ctx context.Context, ssid, psk string) (<-chan 
 	return b.pollProvisionUpdates(ctx, 100*time.Millisecond), nil
 }
 
-func (b *nmBackend) DisableAPMode() error {
+func (b *NetworkManagerProvisioner) DisableAPMode() error {
 	if b.activeConn == "" {
 		return errors.New("no active AP connection")
 	}
@@ -109,7 +116,11 @@ func (b *nmBackend) DisableAPMode() error {
 	return nil
 }
 
-func (b *nmBackend) ConnectToNetwork(ctx context.Context, ssid, psk string) (<-chan ProvisionUpdate, error) {
+func (b *NetworkManagerProvisioner) ConnectToNetwork(ctx context.Context, ssid, psk string) (<-chan ProvisionUpdate, error) {
+	if err := validateCredentials(ssid, psk); err != nil {
+		return nil, err
+	}
+
 	settings := connectionSettings{
 		"connection": {
 			"id":          dbus.MakeVariant(ssid + "-station"),
@@ -137,11 +148,11 @@ func (b *nmBackend) ConnectToNetwork(ctx context.Context, ssid, psk string) (<-c
 	return b.pollProvisionUpdates(ctx, 100*time.Millisecond), nil
 }
 
-func (b *nmBackend) Close() error {
+func (b *NetworkManagerProvisioner) Close() error {
 	return b.conn.Close()
 }
 
-func (b *nmBackend) pollProvisionUpdates(ctx context.Context, tick time.Duration) <-chan ProvisionUpdate {
+func (b *NetworkManagerProvisioner) pollProvisionUpdates(ctx context.Context, tick time.Duration) <-chan ProvisionUpdate {
 	ch := make(chan ProvisionUpdate)
 	go func() {
 		t := time.NewTicker(tick)

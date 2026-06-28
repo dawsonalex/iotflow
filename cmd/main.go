@@ -8,18 +8,35 @@ import (
 )
 
 func main() {
-	p, err := iotflow.NewNmProvisioner(iotflow.WithInterface("wlp2s0"))
+	p, err := iotflow.NewNetworkManagerProvisioner("wlan0")
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer p.Close()
+	defer func(p *iotflow.NetworkManagerProvisioner) {
+		err := p.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}(p)
 
-	updates, err := p.ConnectToNetwork(context.Background(), "SKYV5S1C", "vmetHk8ef6MyYe")
+	f, err := iotflow.NewFlow(p)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	for upd := range updates {
+	defer func(f *iotflow.Flow) {
+		err := f.Finish()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}(f)
+
+	err = f.Begin(context.Background())
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for upd := range f.Subscribe() {
 		if upd.Err != nil {
 			log.Fatal(upd.Err)
 		}

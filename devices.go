@@ -73,7 +73,7 @@ func getDeviceState(conn *dbus.Conn, devicePath dbus.ObjectPath) (deviceState, e
 
 type connectionSettings map[string]map[string]dbus.Variant
 
-func (b *nmBackend) addAndActivateConnection(settings connectionSettings) (dbus.ObjectPath, error) {
+func (b *NetworkManagerProvisioner) addAndActivateConnection(settings connectionSettings) (dbus.ObjectPath, error) {
 	var activeConn, connPath dbus.ObjectPath
 
 	call := b.conn.Object(nmBusName, nmObjectPath).Call(
