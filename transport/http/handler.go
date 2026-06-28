@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 
 	"github.com/dawsonalex/iotflow"
@@ -22,6 +23,7 @@ type Flow interface {
 type handler struct {
 	flow    Flow
 	addr    string
+	ln      net.Listener // when set, used in place of binding addr
 	onError errHandler
 }
 
