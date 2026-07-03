@@ -3,7 +3,7 @@
 # ROOT_DIR is the path of the makefile (including trailing slash)
 ROOT_DIR := $(dir $(realpath $(lastword $(MAKEFILE_LIST))))
 PROJECT_PATH := $(ROOT_DIR:/=)
-BIN_NAME = todo
+BIN_NAME = example
 
 help: ## Display this help message
 	@echo "Available targets:"
@@ -33,7 +33,7 @@ test: ## Run tests
 	@go test -v -race ./...
 
 build: ## Build the binary
-	go build -C '${ROOT_DIR}cmd' -o '${ROOT_DIR}${BIN_NAME}'
+	go build -C '${ROOT_DIR}cmd/example' -o '${ROOT_DIR}${BIN_NAME}'
 
 run: build ## Build and run the binary bin/imageservice
 	${ROOT_DIR}/${BIN_NAME}
