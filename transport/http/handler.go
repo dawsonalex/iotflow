@@ -27,11 +27,12 @@ type Flow interface {
 }
 
 type handler struct {
-	flow      Flow
-	addr      string
-	ln        net.Listener // when set, used in place of binding addr
-	onError   errHandler
-	keepalive time.Duration // SSE heartbeat interval; see defaultKeepalive
+	flow        Flow
+	addr        string
+	routePrefix string
+	ln          net.Listener // when set, used in place of binding addr
+	onError     errHandler
+	keepalive   time.Duration // SSE heartbeat interval; see defaultKeepalive
 }
 
 type credentialsRequest struct {
@@ -83,8 +84,8 @@ func (h *handler) handleGetEvents() http.HandlerFunc {
 
 func (h *handler) mux() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.Handle("POST /credentials", h.handlePostCredentials())
-	mux.Handle("GET /events", h.handleGetEvents())
+	mux.Handle("POST "+h.routePrefix+"/credentials", h.handlePostCredentials())
+	mux.Handle("GET "+h.routePrefix+"/events", h.handleGetEvents())
 	return mux
 }
 

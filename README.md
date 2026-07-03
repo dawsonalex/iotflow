@@ -191,9 +191,42 @@ func main() {
 }
 ```
 
-If you'd rather mount the provisioning endpoints into your own server, use
-`NewHandler(f, opts...)`, which returns an `http.Handler` and does not start a
-listener of its own.
+### Embedding the endpoints in your own server
+
+If you'd rather mount the provisioning endpoints into a server you already run,
+use `NewHandler(f, opts...)`. It returns an `http.Handler` for the two endpoints
+above and starts no listener of its own.
+
+Unlike `Serve`, `NewHandler` only adapts HTTP to `Submit`/`Subscribe` — it does
+**not** run the state machine. You own the `Flow` lifecycle: start it with
+`Begin` (once, in its own goroutine) and tear it down with `Finish`. Without a
+running `Begin` the handler still mounts, but `/events` never emits and the first
+`/credentials` POST is accepted while every later one returns `409` — nothing is
+draining submissions.
+
+```go
+func provisioningRoutes(f *iotflow.Flow) http.Handler {
+    // Serve runs the lifecycle for you; here it's your job. Cancel this ctx to
+    // stop the Flow, and Finish it when you're done (below).
+    go func() {
+        if err := f.Begin(context.Background()); err != nil {
+            log.Printf("provisioning: %v", err)
+        }
+    }()
+
+    mux := http.NewServeMux()
+    mux.Handle("/api/", myAppHandler())
+
+    // WithPrefix bakes the mount path into the endpoint routes so the parent
+    // mount lines up without http.StripPrefix. The endpoints land at
+    // /provision/credentials and /provision/events.
+    mux.Handle("/provision/", iothttp.NewHandler(f, iothttp.WithPrefix("/provision")))
+    return mux
+}
+```
+
+Remember to `defer f.Finish()` wherever you own the `Flow`; it closes the backend
+only if the `Flow` created it (via `NewNetworkManagerFlow`).
 
 ### Reading state updates
 
@@ -259,8 +292,10 @@ yours to close.
 Serve(ctx context.Context, f *iotflow.Flow, opts ...HandlerOpt) error
 NewHandler(f Flow, opts ...HandlerOpt) http.Handler
 
-WithAddress(addr string) HandlerOpt              // default ":80"
-WithListener(ln net.Listener) HandlerOpt         // supply a pre-bound listener
+WithAddress(addr string) HandlerOpt              // default ":80" (Serve only)
+WithListener(ln net.Listener) HandlerOpt         // supply a pre-bound listener (Serve only)
+WithPrefix(prefix string) HandlerOpt             // path prefix for mounted routes (normalized); default "" (flat)
+WithKeepalive(d time.Duration) HandlerOpt        // SSE heartbeat interval; default 15s, non-positive disables
 WithErrorHandler(func(r *http.Request, err error)) HandlerOpt
 ```
 

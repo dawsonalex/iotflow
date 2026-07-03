@@ -3,6 +3,8 @@ package http
 import (
 	"net"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -29,4 +31,24 @@ func WithAddress(addr string) HandlerOpt {
 // the listener's lifecycle.
 func WithListener(ln net.Listener) HandlerOpt {
 	return func(h *handler) { h.ln = ln }
+}
+
+var multiSlashRegex = regexp.MustCompile("/{2,}")
+
+// WithPrefix sets a path prefix for the handler's routes, so the endpoints can
+// be mounted under that prefix in a parent mux (e.g. "/provision" serves
+// POST /provision/credentials and GET /provision/events) without wrapping the
+// handler in http.StripPrefix. The prefix is normalized: leading and trailing
+// slashes don't matter, and the empty string leaves the routes flat (the
+// default).
+func WithPrefix(prefix string) HandlerOpt {
+	return func(h *handler) {
+		prefix = strings.Trim(prefix, "/")
+		prefix = multiSlashRegex.ReplaceAllString(prefix, "/")
+		if prefix == "" {
+			return
+		}
+
+		h.routePrefix = "/" + prefix
+	}
 }
