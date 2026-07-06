@@ -8,4 +8,5 @@ type Provisioner interface {
 	DisableAPMode() error
 	ConnectToNetwork(context.Context, string, string) (<-chan ProvisionUpdate, error)
 	Close() error
+	Scan(context.Context) ([]Network, error)
 }

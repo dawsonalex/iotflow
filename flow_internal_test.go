@@ -31,6 +31,7 @@ func (s *closeStub) Close() error {
 	s.closeCalls++
 	return s.closeErr
 }
+func (s *closeStub) Scan(context.Context) ([]Network, error) { panic("unused") }
 
 func TestFinish_OwnedProvisionerIsClosed(t *testing.T) {
 	p := &closeStub{}

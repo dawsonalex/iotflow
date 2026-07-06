@@ -30,7 +30,12 @@ type MockProvisioner struct {
 	EnableAPModeFn     func(context.Context, string, string) (<-chan iotflow.ProvisionUpdate, error)
 	DisableAPModeFn    func() error
 	ConnectToNetworkFn func(context.Context, string, string) (<-chan iotflow.ProvisionUpdate, error)
+	ScanFn             func(context.Context) ([]iotflow.Network, error)
 	CloseFn            func() error
+}
+
+func (m *MockProvisioner) Scan(ctx context.Context) ([]iotflow.Network, error) {
+	return m.ScanFn(ctx)
 }
 
 func (m *MockProvisioner) IsConnected(ctx context.Context) (bool, error) {

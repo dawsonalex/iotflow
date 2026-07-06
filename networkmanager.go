@@ -191,3 +191,170 @@ func toProvisionUpdate(s deviceState) ProvisionUpdate {
 		return ProvisionUpdate{State: ProvisionStateConnecting}
 	}
 }
+
+const dbusErrNotAllowed = "org.freedesktop.NetworkManager.Device.NotAllowed"
+
+func (b *NetworkManagerProvisioner) Scan(ctx context.Context) ([]Network, error) {
+	t, err := b.lastScanTime(ctx)
+	if err != nil {
+		return nil, err
+	}
+	shouldAwaitScan, err := b.requestScan(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if shouldAwaitScan {
+		if err = b.awaitLastScanTimeUpdate(ctx, t); err != nil {
+			return nil, err
+		}
+	}
+
+	return b.getNetworkList(ctx)
+}
+
+const nmAccessPointIface = "org.freedesktop.NetworkManager.AccessPoint"
+
+func (b *NetworkManagerProvisioner) getNetworkList(ctx context.Context) ([]Network, error) {
+	accessPointsVariant, err := b.conn.Object(nmBusName, b.ifacePath).GetProperty("org.freedesktop.NetworkManager.Device.Wireless.AccessPoints")
+	if err != nil {
+		return nil, fmt.Errorf("getting access points: %w", err)
+	}
+
+	var accessPoints []dbus.ObjectPath
+	err = accessPointsVariant.Store(&accessPoints)
+	if err != nil {
+		return nil, fmt.Errorf("storing access points: %w", err)
+	}
+
+	networks := make([]Network, 0, len(accessPoints))
+	for _, apPath := range accessPoints {
+		ap := b.conn.Object(nmBusName, apPath)
+
+		ssidVariant, err := ap.GetProperty(nmAccessPointIface + ".Ssid")
+		if err != nil {
+			continue
+		}
+		var ssidBytes []byte
+		if err := ssidVariant.Store(&ssidBytes); err != nil {
+			continue
+		}
+
+		strengthVariant, err := ap.GetProperty(nmAccessPointIface + ".Strength")
+		if err != nil {
+			continue
+		}
+		var strength uint8
+		if err := strengthVariant.Store(&strength); err != nil {
+			continue
+		}
+
+		var security NetworkSecurity
+		if security, err = b.accessPointSecurity(apPath); err != nil {
+			continue
+		}
+
+		networks = append(networks, Network{
+			SSID:     string(ssidBytes),
+			Signal:   strength,
+			Security: security,
+		})
+	}
+
+	return networks, nil
+}
+
+// calculates the security that an access point has (wpa, wpa2, etc)
+func (b *NetworkManagerProvisioner) accessPointSecurity(apPath dbus.ObjectPath) (NetworkSecurity, error) {
+	flagsVariant, err := b.conn.Object(nmBusName, apPath).GetProperty("org.freedesktop.NetworkManager.AccessPoint.Flags")
+	if err != nil {
+		return NetworkSecurityNone, fmt.Errorf("getting security flags: %w", err)
+	}
+
+	var flags uint32
+	if err = flagsVariant.Store(&flags); err != nil {
+		return NetworkSecurityNone, fmt.Errorf("storing security flags: %w", err)
+	}
+
+	wpaSecVariant, err := b.conn.Object(nmBusName, apPath).GetProperty("org.freedesktop.NetworkManager.AccessPoint.WpaFlags")
+	if err != nil {
+		return NetworkSecurityNone, fmt.Errorf("getting WPA flags: %w", err)
+	}
+
+	var wpaFlags uint32
+	if err = wpaSecVariant.Store(&wpaFlags); err != nil {
+		return NetworkSecurityNone, fmt.Errorf("storing WPA flags: %w", err)
+	}
+
+	rsnFlagsVariant, err := b.conn.Object(nmBusName, apPath).GetProperty("org.freedesktop.NetworkManager.AccessPoint.RsnFlags")
+	if err != nil {
+		return NetworkSecurityNone, fmt.Errorf("getting RSN flags: %w", err)
+	}
+
+	var rsnFlags uint32
+	if err = rsnFlagsVariant.Store(&rsnFlags); err != nil {
+		return NetworkSecurityNone, fmt.Errorf("storing RSN flags: %w", err)
+	}
+
+	return newNetworkSecurity(flags, wpaFlags, rsnFlags), nil
+}
+
+// requestScan requests a re-scan of the AP list, returning a bool that indicates whether the caller should
+// await the list updating, alongside an error.
+func (b *NetworkManagerProvisioner) requestScan(ctx context.Context) (bool, error) {
+	call := b.conn.Object(nmBusName, b.ifacePath).CallWithContext(
+		ctx,
+		"org.freedesktop.NetworkManager.Device.Wireless.RequestScan",
+		0,
+		map[string]dbus.Variant{},
+	)
+	if call.Err != nil {
+		var errDBus dbus.Error
+		// dbusErrNotAllowed often occurs due to rate limiting by NetworkManager when requesting scans.
+		// We can fall through to using existing AP list instead.
+		if errors.As(call.Err, &errDBus) && errDBus.Name == dbusErrNotAllowed {
+			return false, nil
+		}
+
+		return false, fmt.Errorf("requesting scan: %w", call.Err)
+	}
+
+	return true, nil
+}
+
+func (b *NetworkManagerProvisioner) lastScanTime(ctx context.Context) (int64, error) {
+	var lastScanTime int64
+	lastScanVariant, err := b.conn.Object(nmBusName, b.ifacePath).GetProperty("org.freedesktop.NetworkManager.Device.Wireless.LastScan")
+	if err != nil {
+		return 0, err
+	}
+	err = lastScanVariant.Store(&lastScanTime)
+	if err != nil {
+		return 0, err
+	}
+
+	return lastScanTime, nil
+}
+
+func (b *NetworkManagerProvisioner) awaitLastScanTimeUpdate(ctx context.Context, startTime int64) error {
+	t := time.NewTicker(100 * time.Millisecond)
+	defer t.Stop()
+
+	for range t.C {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			scanTime, err := b.lastScanTime(ctx)
+			if err != nil {
+				return fmt.Errorf("awaiting last scan update: %w", err)
+			}
+
+			if scanTime > startTime {
+				return nil
+			}
+		}
+	}
+
+	return nil
+}
