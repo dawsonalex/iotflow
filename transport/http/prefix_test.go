@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,10 @@ import (
 // accepts, so a routed POST /credentials yields 202; a request that never
 // reaches the handler yields 404 from the mux instead.
 type stubFlow struct{}
+
+func (stubFlow) ListAccessPoints(ctx context.Context) ([]iotflow.Network, error) {
+	panic("unimplemented")
+}
 
 func (stubFlow) Submit(_, _ string) error { return nil }
 

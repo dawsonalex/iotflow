@@ -304,6 +304,14 @@ func (f *Flow) Finish() error {
 	return nil
 }
 
+func (f *Flow) ListAccessPoints(ctx context.Context) ([]Network, error) {
+	aps, err := f.provisioner.Scan(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("flow: listing access points: %w", err)
+	}
+	return aps, nil
+}
+
 // emit fans an update out to all subscribers without blocking the state
 // machine. A subscriber whose buffer is full misses the update.
 func (f *Flow) emit(u FlowUpdate) {

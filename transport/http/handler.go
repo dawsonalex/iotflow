@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +24,7 @@ type errHandler func(r *http.Request, err error)
 type Flow interface {
 	Submit(ssid, psk string) error
 	Subscribe() (<-chan iotflow.FlowUpdate, func())
+	ListAccessPoints(ctx context.Context) ([]iotflow.Network, error)
 }
 
 type handler struct {
@@ -45,9 +47,7 @@ func (h *handler) handlePostCredentials() http.HandlerFunc {
 		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
 			http.Error(rw, err.Error(), http.StatusBadRequest)
 
-			if h.onError != nil {
-				h.onError(r, fmt.Errorf("%w: decoding request body: %w", ErrValidation, err))
-			}
+			h.handleErr(r, fmt.Errorf("%w: decoding request body: %w", ErrValidation, err))
 			return
 		}
 
@@ -61,9 +61,7 @@ func (h *handler) handlePostCredentials() http.HandlerFunc {
 			http.Error(rw, err.Error(), http.StatusBadRequest) // 400
 		default:
 			http.Error(rw, err.Error(), http.StatusInternalServerError)
-			if h.onError != nil {
-				h.onError(r, err)
-			}
+			h.handleErr(r, err)
 		}
 	}
 }
@@ -76,10 +74,37 @@ func (h *handler) handleGetEvents() http.HandlerFunc {
 	}
 }
 
+type networkResponse struct {
+	Networks []iotflow.Network `json:"networks"`
+}
+
+func (h *handler) handleGetAps() http.HandlerFunc {
+	return func(rw http.ResponseWriter, r *http.Request) {
+		aps, err := h.flow.ListAccessPoints(r.Context())
+		if err != nil {
+			http.Error(rw, err.Error(), http.StatusInternalServerError)
+			h.handleErr(r, err)
+			return
+		}
+		resp := networkResponse{Networks: aps}
+		if err := json.NewEncoder(rw).Encode(resp); err != nil {
+			http.Error(rw, err.Error(), http.StatusInternalServerError)
+			h.handleErr(r, err)
+		}
+	}
+}
+
+func (h *handler) handleErr(r *http.Request, err error) {
+	if h.onError != nil {
+		h.onError(r, err)
+	}
+}
+
 func (h *handler) mux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("POST "+h.routePrefix+"/credentials", h.handlePostCredentials())
 	mux.Handle("GET "+h.routePrefix+"/events", h.handleGetEvents())
+	mux.Handle("GET "+h.routePrefix+"/aps", h.handleGetAps())
 	return mux
 }
 
