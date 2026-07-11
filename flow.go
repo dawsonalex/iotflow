@@ -97,11 +97,10 @@ type Flow struct {
 
 	credsCh chan credentials // Submit → state machine
 
-	mu       sync.Mutex                   // guards subs, closed, last and hasState
-	subs     map[chan FlowUpdate]struct{} // active update subscribers
-	closed   bool                         // true once Begin has returned
-	last     FlowUpdate                   // most recent emitted update; replayed to new subscribers
-	hasState bool                         // true once at least one update has been emitted
+	mu              sync.Mutex                   // guards subs, closed, lastStateUpdate
+	subs            map[chan FlowUpdate]struct{} // active update subscribers
+	closed          bool                         // true once Begin has returned
+	lastStateUpdate FlowUpdate                   // most recent emitted update; replayed to new subscribers.
 }
 
 type FlowOpt func(*Flow)
@@ -177,48 +176,40 @@ func (f *Flow) Submit(ssid, psk string) error {
 // buffered; if a subscriber falls behind, updates are dropped rather than
 // blocking the state machine. Every channel is closed when Begin returns.
 //
-// Once the Flow has begun, the current state is replayed as the first update on
-// the returned channel, so a subscriber that joins mid-flow immediately learns
-// where the Flow is rather than only seeing future transitions. A subscriber
-// that joins before Begin (no state emitted yet) receives no such replay; its
-// first update is the first real transition. Subscribing after Begin has
-// returned yields the terminal state followed by a close, so a late subscriber
-// still learns the outcome.
+// The first event down the returned channel is always the current state of the flow.
 //
-// Call Unsubscribe to release a subscription early (e.g. when an SSE client
+// Call the returned function to release a subscription early (e.g. when an SSE client
 // disconnects); otherwise it is released when Begin returns.
-func (f *Flow) Subscribe() <-chan FlowUpdate {
+func (f *Flow) Subscribe() (<-chan FlowUpdate, func()) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	noopUnsub := func() {}
+
+	ch := make(chan FlowUpdate, 16)
 	// Replay the current state into the buffer. The channel is freshly created
 	// with spare capacity, so this send never blocks. Holding mu makes the
 	// replay-and-register atomic with emit: a subscriber can neither miss a
 	// transition nor receive the current state twice.
-	ch := make(chan FlowUpdate, 16)
-	if f.hasState {
-		ch <- f.last
-	}
+	ch <- f.lastStateUpdate
 	if f.closed {
 		close(ch)
-		return ch
+		return ch, noopUnsub
 	}
+
 	f.subs[ch] = struct{}{}
-	return ch
+	return ch, func() {
+		f.removeSub(ch)
+	}
 }
 
-// Unsubscribe removes and closes a subscription previously returned by
-// Subscribe. It is a no-op if the channel is unknown or already released.
-func (f *Flow) Unsubscribe(ch <-chan FlowUpdate) {
+func (f *Flow) removeSub(ch chan FlowUpdate) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for c := range f.subs {
-		if c == ch {
-			delete(f.subs, c)
-			close(c)
-			return
-		}
+	if _, ok := f.subs[ch]; ok {
+		close(ch)
 	}
+	delete(f.subs, ch)
 }
 
 // Begin runs the provisioning lifecycle, blocking until the device is
@@ -304,7 +295,8 @@ func (f *Flow) Begin(ctx context.Context) error {
 }
 
 func (f *Flow) Finish() error {
-	// TODO: Probably need to also close other things here (server, etc)
+	f.closeSubs()
+
 	if f.ownsProvisioner {
 		return f.provisioner.Close()
 	}
@@ -317,8 +309,7 @@ func (f *Flow) Finish() error {
 func (f *Flow) emit(u FlowUpdate) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.last = u
-	f.hasState = true
+	f.lastStateUpdate = u
 	for c := range f.subs {
 		select {
 		case c <- u:

@@ -20,13 +20,10 @@ type stubFlow struct{}
 
 func (stubFlow) Submit(_, _ string) error { return nil }
 
-func (stubFlow) Subscribe() <-chan iotflow.FlowUpdate {
+func (stubFlow) Subscribe() (<-chan iotflow.FlowUpdate, func()) {
 	ch := make(chan iotflow.FlowUpdate)
-	close(ch)
-	return ch
+	return ch, func() { close(ch) }
 }
-
-func (stubFlow) Unsubscribe(<-chan iotflow.FlowUpdate) {}
 
 // TestPrefixMountRoutesWithoutStripPrefix pins the embedding contract: a caller
 // can mount NewHandler under a path prefix in their own mux and have the

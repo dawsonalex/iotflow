@@ -60,10 +60,13 @@ func TestBegin_AlreadyConnected(t *testing.T) {
 		IsConnectedFn: func(_ context.Context) (bool, error) { return true, nil },
 	})
 
-	results, _ := watchUpdates(t, f.Subscribe(), iotflow.StateConnected)
+	sub, unsub := f.Subscribe()
+	defer unsub()
+	results, _ := watchUpdates(t, sub, iotflow.StateConnected)
 
 	assert.NoError(t, f.Begin(t.Context()))
 	assert.Equal(t, []iotflow.FlowState{
+		iotflow.StateIdle,
 		iotflow.StateCheckingConnection,
 		iotflow.StateConnected,
 	}, stateSeq(<-results))
@@ -80,7 +83,9 @@ func TestBegin_FullProvisioning(t *testing.T) {
 		},
 	})
 
-	results, waiting := watchUpdates(t, f.Subscribe(), iotflow.StateWaitingForCredentials)
+	sub, unsub := f.Subscribe()
+	defer unsub()
+	results, waiting := watchUpdates(t, sub, iotflow.StateWaitingForCredentials)
 
 	beginErr := make(chan error, 1)
 	go func() { beginErr <- f.Begin(t.Context()) }()
@@ -90,6 +95,7 @@ func TestBegin_FullProvisioning(t *testing.T) {
 
 	assert.NoError(t, <-beginErr)
 	assert.Equal(t, []iotflow.FlowState{
+		iotflow.StateIdle,
 		iotflow.StateCheckingConnection,
 		iotflow.StateEnablingAP,
 		iotflow.StateWaitingForCredentials,
@@ -118,7 +124,10 @@ func TestBegin_RetryOnConnectionFailure(t *testing.T) {
 		},
 	})
 
-	results, waiting := watchUpdates(t, f.Subscribe(), iotflow.StateWaitingForCredentials)
+	ch, unsub := f.Subscribe()
+	defer unsub()
+
+	results, waiting := watchUpdates(t, ch, iotflow.StateWaitingForCredentials)
 
 	beginErr := make(chan error, 1)
 	go func() { beginErr <- f.Begin(t.Context()) }()
@@ -133,6 +142,7 @@ func TestBegin_RetryOnConnectionFailure(t *testing.T) {
 
 	assert.NoError(t, <-beginErr)
 	assert.Equal(t, []iotflow.FlowState{
+		iotflow.StateIdle,
 		iotflow.StateCheckingConnection,
 		iotflow.StateEnablingAP,
 		iotflow.StateWaitingForCredentials,
@@ -154,13 +164,16 @@ func TestBegin_IsConnectedError(t *testing.T) {
 		IsConnectedFn: func(_ context.Context) (bool, error) { return false, backendErr },
 	})
 
-	results, _ := watchUpdates(t, f.Subscribe(), iotflow.StateFailed)
+	ch, unsub := f.Subscribe()
+	defer unsub()
+
+	results, _ := watchUpdates(t, ch, iotflow.StateFailed)
 
 	err := f.Begin(t.Context())
 	assert.ErrorIs(t, err, backendErr)
 
 	updates := <-results
-	assert.Equal(t, []iotflow.FlowState{iotflow.StateCheckingConnection, iotflow.StateFailed}, stateSeq(updates))
+	assert.Equal(t, []iotflow.FlowState{iotflow.StateIdle, iotflow.StateCheckingConnection, iotflow.StateFailed}, stateSeq(updates))
 	assert.ErrorIs(t, updates[len(updates)-1].Err, backendErr)
 }
 
@@ -171,13 +184,16 @@ func TestBegin_EnableAPModeError(t *testing.T) {
 		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan iotflow.ProvisionUpdate, error) { return nil, backendErr },
 	})
 
-	results, _ := watchUpdates(t, f.Subscribe(), iotflow.StateFailed)
+	ch, unsub := f.Subscribe()
+	defer unsub()
+
+	results, _ := watchUpdates(t, ch, iotflow.StateFailed)
 
 	err := f.Begin(t.Context())
 	assert.ErrorIs(t, err, backendErr)
 
 	updates := <-results
-	assert.Equal(t, []iotflow.FlowState{iotflow.StateCheckingConnection, iotflow.StateEnablingAP, iotflow.StateFailed}, stateSeq(updates))
+	assert.Equal(t, []iotflow.FlowState{iotflow.StateIdle, iotflow.StateCheckingConnection, iotflow.StateEnablingAP, iotflow.StateFailed}, stateSeq(updates))
 }
 
 func TestBegin_DisableAPModeError(t *testing.T) {
@@ -190,7 +206,10 @@ func TestBegin_DisableAPModeError(t *testing.T) {
 		DisableAPModeFn: func() error { return backendErr },
 	})
 
-	results, waiting := watchUpdates(t, f.Subscribe(), iotflow.StateWaitingForCredentials)
+	ch, unsub := f.Subscribe()
+	defer unsub()
+
+	results, waiting := watchUpdates(t, ch, iotflow.StateWaitingForCredentials)
 
 	beginErr := make(chan error, 1)
 	go func() { beginErr <- f.Begin(t.Context()) }()
@@ -203,6 +222,7 @@ func TestBegin_DisableAPModeError(t *testing.T) {
 
 	updates := <-results
 	assert.Equal(t, []iotflow.FlowState{
+		iotflow.StateIdle,
 		iotflow.StateCheckingConnection,
 		iotflow.StateEnablingAP,
 		iotflow.StateWaitingForCredentials,
@@ -220,7 +240,10 @@ func TestBegin_ContextCancelledWhileWaiting(t *testing.T) {
 		},
 	})
 
-	results, waiting := watchUpdates(t, f.Subscribe(), iotflow.StateWaitingForCredentials)
+	ch, unsub := f.Subscribe()
+	defer unsub()
+
+	results, waiting := watchUpdates(t, ch, iotflow.StateWaitingForCredentials)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	beginErr := make(chan error, 1)
@@ -271,7 +294,7 @@ func TestSubscribe_AfterCompletionIsClosed(t *testing.T) {
 	// Begin has returned; a late subscriber (e.g. an SSE client that connects
 	// after provisioning finished) receives the terminal state once and then a
 	// close, so it learns the outcome without blocking forever.
-	ch := f.Subscribe()
+	ch, _ := f.Subscribe()
 
 	upd, ok := <-ch
 	assert.True(t, ok)
@@ -284,11 +307,12 @@ func TestSubscribe_AfterCompletionIsClosed(t *testing.T) {
 func TestUnsubscribe_ReleasesChannel(t *testing.T) {
 	f := newTestFlow(t, &iotflowtest.MockProvisioner{})
 
-	ch := f.Subscribe()
-	f.Unsubscribe(ch)
+	ch, unsub := f.Subscribe()
+	unsub()
 
 	// An unsubscribed channel is closed, so a receive returns the zero value
-	// with ok == false rather than blocking.
+	// with ok == false rather than blocking. The first value from the channel is the flow state, pop that.
+	<-ch
 	_, ok := <-ch
 	assert.False(t, ok)
 }
@@ -296,14 +320,9 @@ func TestUnsubscribe_ReleasesChannel(t *testing.T) {
 func TestUnsubscribe_UnknownChannelIsNoop(t *testing.T) {
 	f := newTestFlow(t, &iotflowtest.MockProvisioner{})
 
-	// Unsubscribing a channel the Flow never handed out must not panic or close
-	// anything; likewise a second Unsubscribe of an already-released channel.
-	other := make(chan iotflow.FlowUpdate)
-	assert.NotPanics(t, func() { f.Unsubscribe(other) })
-
-	ch := f.Subscribe()
-	f.Unsubscribe(ch)
-	assert.NotPanics(t, func() { f.Unsubscribe(ch) })
+	_, unsub := f.Subscribe()
+	unsub()
+	assert.NotPanics(t, func() { unsub() })
 }
 
 // --- Provisioner ownership (Finish) ---
@@ -353,7 +372,10 @@ func TestBegin_RetryOnConnectError(t *testing.T) {
 		},
 	})
 
-	results, waiting := watchUpdates(t, f.Subscribe(), iotflow.StateWaitingForCredentials)
+	ch, unsub := f.Subscribe()
+	defer unsub()
+
+	results, waiting := watchUpdates(t, ch, iotflow.StateWaitingForCredentials)
 
 	beginErr := make(chan error, 1)
 	go func() { beginErr <- f.Begin(t.Context()) }()
@@ -366,6 +388,7 @@ func TestBegin_RetryOnConnectError(t *testing.T) {
 
 	assert.NoError(t, <-beginErr)
 	assert.Equal(t, []iotflow.FlowState{
+		iotflow.StateIdle,
 		iotflow.StateCheckingConnection,
 		iotflow.StateEnablingAP,
 		iotflow.StateWaitingForCredentials,
@@ -396,7 +419,10 @@ func TestBegin_ContextCancelledDuringConnect(t *testing.T) {
 		},
 	})
 
-	results, waiting := watchUpdates(t, f.Subscribe(), iotflow.StateWaitingForCredentials)
+	ch, unsub := f.Subscribe()
+	defer unsub()
+
+	results, waiting := watchUpdates(t, ch, iotflow.StateWaitingForCredentials)
 
 	beginErr := make(chan error, 1)
 	go func() { beginErr <- f.Begin(ctx) }()
@@ -430,7 +456,10 @@ func TestBegin_ContextCancelledDuringConnectChannel(t *testing.T) {
 		},
 	})
 
-	results, waiting := watchUpdates(t, f.Subscribe(), iotflow.StateConnecting)
+	ch, unsub := f.Subscribe()
+	defer unsub()
+
+	results, waiting := watchUpdates(t, ch, iotflow.StateConnecting)
 
 	beginErr := make(chan error, 1)
 	go func() { beginErr <- f.Begin(ctx) }()
@@ -475,7 +504,10 @@ func TestBegin_DropsStaleCredentialsOnRetry(t *testing.T) {
 		},
 	})
 
-	_, waiting := watchUpdates(t, f.Subscribe(), iotflow.StateWaitingForCredentials)
+	ch, unsub := f.Subscribe()
+	defer unsub()
+
+	_, waiting := watchUpdates(t, ch, iotflow.StateWaitingForCredentials)
 
 	beginErr := make(chan error, 1)
 	go func() { beginErr <- f.Begin(t.Context()) }()

@@ -22,8 +22,7 @@ type errHandler func(r *http.Request, err error)
 
 type Flow interface {
 	Submit(ssid, psk string) error
-	Subscribe() <-chan iotflow.FlowUpdate
-	Unsubscribe(<-chan iotflow.FlowUpdate)
+	Subscribe() (<-chan iotflow.FlowUpdate, func())
 }
 
 type handler struct {
@@ -71,13 +70,8 @@ func (h *handler) handlePostCredentials() http.HandlerFunc {
 
 func (h *handler) handleGetEvents() http.HandlerFunc {
 	return func(rw http.ResponseWriter, r *http.Request) {
-		// The subscription is torn down on every exit path: a client disconnect
-		// cancels r.Context() (which doSseResponse selects on) and the deferred
-		// Unsubscribe runs; when the Flow finishes it closes ch itself, so
-		// doSseResponse returns and Unsubscribe safely no-ops on the already
-		// removed channel.
-		ch := h.flow.Subscribe()
-		defer h.flow.Unsubscribe(ch)
+		ch, unsubscribe := h.flow.Subscribe()
+		defer unsubscribe()
 		doSseResponse(rw, r, ch, h.keepalive, h.onError)
 	}
 }
