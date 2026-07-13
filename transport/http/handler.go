@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dawsonalex/iotflow"
+	"github.com/dawsonalex/iotflow/provision"
 )
 
 var ErrValidation = errors.New("validation error")
@@ -24,7 +25,7 @@ type errHandler func(r *http.Request, err error)
 type Flow interface {
 	Submit(ssid, psk string) error
 	Subscribe() (<-chan iotflow.FlowUpdate, func())
-	ListAccessPoints(ctx context.Context) ([]iotflow.Network, error)
+	ListAccessPoints(ctx context.Context) ([]provision.Network, error)
 }
 
 type handler struct {
@@ -57,7 +58,7 @@ func (h *handler) handlePostCredentials() http.HandlerFunc {
 			rw.WriteHeader(http.StatusAccepted) // 202 — acked while AP is still up
 		case errors.Is(err, iotflow.ErrSubmissionPending):
 			http.Error(rw, err.Error(), http.StatusConflict) // 409
-		case errors.Is(err, iotflow.ErrSSIDInvalid), errors.Is(err, iotflow.ErrPSKInvalid):
+		case errors.Is(err, provision.ErrSSIDInvalid), errors.Is(err, provision.ErrPSKInvalid):
 			http.Error(rw, err.Error(), http.StatusBadRequest) // 400
 		default:
 			http.Error(rw, err.Error(), http.StatusInternalServerError)
@@ -75,7 +76,7 @@ func (h *handler) handleGetEvents() http.HandlerFunc {
 }
 
 type networkResponse struct {
-	Networks []iotflow.Network `json:"networks"`
+	Networks []provision.Network `json:"networks"`
 }
 
 func (h *handler) handleGetAps() http.HandlerFunc {

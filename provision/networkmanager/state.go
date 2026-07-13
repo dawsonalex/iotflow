@@ -1,4 +1,4 @@
-package iotflow
+package networkmanager
 
 type deviceState uint32
 

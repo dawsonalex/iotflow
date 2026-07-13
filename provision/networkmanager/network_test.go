@@ -1,7 +1,9 @@
-package iotflow
+package networkmanager
 
 import (
 	"testing"
+
+	"github.com/dawsonalex/iotflow/provision"
 )
 
 func TestNetworkSecurityConstructor(t *testing.T) {
@@ -10,14 +12,14 @@ func TestNetworkSecurityConstructor(t *testing.T) {
 		flagBits uint32
 		wpaBits  uint32
 		rsnBits  uint32
-		expected NetworkSecurity
+		expected provision.NetworkSecurity
 	}{
 		{
 			"open",
 			0,
 			0,
 			0,
-			NetworkSecurityNone,
+			provision.NetworkSecurityNone,
 		},
 		{
 			// WEP only sets the privacy bit; it advertises no WPA/RSN flags.
@@ -25,7 +27,7 @@ func TestNetworkSecurityConstructor(t *testing.T) {
 			apflagsPrivacy,
 			0,
 			0,
-			NetworkSecurityNone,
+			provision.NetworkSecurityNone,
 		},
 		{
 			// Enterprise (wpa-eap) is 802.1X carried in the RSN element.
@@ -33,7 +35,7 @@ func TestNetworkSecurityConstructor(t *testing.T) {
 			apflagsPrivacy,
 			0,
 			secKeyMgmt8021X,
-			NetworkSecurityWpaEap,
+			provision.NetworkSecurityWpaEap,
 		},
 		{
 			// WPA/WPA2 mixed enterprise: 802.1X advertised in both IEs.
@@ -41,7 +43,7 @@ func TestNetworkSecurityConstructor(t *testing.T) {
 			apflagsPrivacy,
 			secKeyMgmt8021X,
 			secKeyMgmt8021X,
-			NetworkSecurityWpaEap,
+			provision.NetworkSecurityWpaEap,
 		},
 		{
 			// Suite-B-192 is RSN-only.
@@ -49,7 +51,7 @@ func TestNetworkSecurityConstructor(t *testing.T) {
 			apflagsPrivacy,
 			0,
 			secKeyMgmtEAPSuiteB,
-			NetworkSecurityWpaEapSuiteB,
+			provision.NetworkSecurityWpaEapSuiteB,
 		},
 		{
 			// Legacy WPA1-only PSK: PSK in the WPA element, no RSN.
@@ -57,7 +59,7 @@ func TestNetworkSecurityConstructor(t *testing.T) {
 			apflagsPrivacy,
 			secKeyMgmtPSK,
 			0,
-			NetworkSecurityWpaPsk,
+			provision.NetworkSecurityWpaPsk,
 		},
 		{
 			// WPA2 PSK: PSK in the RSN element.
@@ -65,7 +67,7 @@ func TestNetworkSecurityConstructor(t *testing.T) {
 			apflagsPrivacy,
 			0,
 			secKeyMgmtPSK,
-			NetworkSecurityWpaPsk,
+			provision.NetworkSecurityWpaPsk,
 		},
 		{
 			// WPA/WPA2 mixed PSK: PSK advertised in both IEs.
@@ -73,7 +75,7 @@ func TestNetworkSecurityConstructor(t *testing.T) {
 			apflagsPrivacy,
 			secKeyMgmtPSK,
 			secKeyMgmtPSK,
-			NetworkSecurityWpaPsk,
+			provision.NetworkSecurityWpaPsk,
 		},
 		{
 			// WPA3 personal: SAE is RSN-only.
@@ -81,7 +83,7 @@ func TestNetworkSecurityConstructor(t *testing.T) {
 			apflagsPrivacy,
 			0,
 			secKeyMgmtSAE,
-			NetworkSecuritySae,
+			provision.NetworkSecuritySae,
 		},
 		// Precedence cases: when an AP advertises more than one key-management
 		// type, the soft-AP flow (open / PSK / SAE only) must report a
@@ -94,7 +96,7 @@ func TestNetworkSecurityConstructor(t *testing.T) {
 			apflagsPrivacy,
 			0,
 			secKeyMgmtSAE | secKeyMgmtPSK,
-			NetworkSecuritySae,
+			provision.NetworkSecuritySae,
 		},
 		{
 			// WPA2-Enterprise and WPA2-Personal together. Enterprise is not
@@ -103,7 +105,7 @@ func TestNetworkSecurityConstructor(t *testing.T) {
 			apflagsPrivacy,
 			0,
 			secKeyMgmt8021X | secKeyMgmtPSK,
-			NetworkSecurityWpaPsk,
+			provision.NetworkSecurityWpaPsk,
 		},
 		{
 			// SAE alongside enterprise: SAE is compatible, 802.1X is not.
@@ -111,7 +113,7 @@ func TestNetworkSecurityConstructor(t *testing.T) {
 			apflagsPrivacy,
 			0,
 			secKeyMgmtSAE | secKeyMgmt8021X,
-			NetworkSecuritySae,
+			provision.NetworkSecuritySae,
 		},
 		{
 			// Everything at once: SAE outranks PSK, enterprise and Suite-B.
@@ -119,7 +121,7 @@ func TestNetworkSecurityConstructor(t *testing.T) {
 			apflagsPrivacy,
 			0,
 			secKeyMgmtSAE | secKeyMgmtPSK | secKeyMgmt8021X | secKeyMgmtEAPSuiteB,
-			NetworkSecuritySae,
+			provision.NetworkSecuritySae,
 		},
 		{
 			// Flags spread across both IEs (enterprise in WPA1, PSK in RSN)
@@ -128,7 +130,7 @@ func TestNetworkSecurityConstructor(t *testing.T) {
 			apflagsPrivacy,
 			secKeyMgmt8021X,
 			secKeyMgmtPSK,
-			NetworkSecurityWpaPsk,
+			provision.NetworkSecurityWpaPsk,
 		},
 	}
 

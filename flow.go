@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/dawsonalex/iotflow/provision"
 )
 
 // FlowState represents the current state of a provisioning Flow.
@@ -90,10 +92,9 @@ var ErrSubmissionPending = errors.New("a credential submission is already pendin
 // adapts those two seams to HTTP, BLE, MQTT, etc. The Flow itself knows nothing
 // about how credentials reach it or how updates are delivered.
 type Flow struct {
-	ownsProvisioner bool // indicates whether Flow owns the lifecycle of the provisioner
-	provisioner     Provisioner
-	apSSID          string
-	apPSK           string
+	provisioner provision.Provisioner
+	apSSID      string
+	apPSK       string
 
 	credsCh chan credentials // Submit → state machine
 
@@ -105,39 +106,11 @@ type Flow struct {
 
 type FlowOpt func(*Flow)
 
-// NewNetworkManagerFlow creates a new flow for the network manager. apSsid and apPsk set ssid and password for
-// the flows AP mode. iface is the name of the network interface to use.
-// Make sure to call Finish on the flow to release resources.
-func NewNetworkManagerFlow(apSsid, apPsk, iface string, opts ...FlowOpt) (*Flow, error) {
-	if err := validateCredentials(apSsid, apPsk); err != nil {
-		return nil, err
-	}
-
-	p, err := NewNetworkManagerProvisioner(iface)
-	if err != nil {
-		return nil, fmt.Errorf("creating network manager provisioner for flow: %w", err)
-	}
-
-	f := &Flow{
-		ownsProvisioner: true,
-		apSSID:          apSsid,
-		apPSK:           apPsk,
-		provisioner:     p,
-		credsCh:         make(chan credentials, 1),
-		subs:            make(map[chan FlowUpdate]struct{}),
-	}
-
-	for _, o := range opts {
-		o(f)
-	}
-	return f, nil
-}
-
 // NewFlow creates a new flow for Provisioner p. apSsid and apPsk set ssid and password for
 // the flows AP mode.
-// Make sure to call Finish on the flow
-func NewFlow(apSsid, apPsk string, p Provisioner, opts ...FlowOpt) (*Flow, error) {
-	if err := validateCredentials(apSsid, apPsk); err != nil {
+// Flow.Finish() should be called when provisioning is done so that resources can be released.
+func NewFlow(apSsid, apPsk string, p provision.Provisioner, opts ...FlowOpt) (*Flow, error) {
+	if err := provision.ValidateCredentials(apSsid, apPsk); err != nil {
 		return nil, err
 	}
 
@@ -160,7 +133,7 @@ func NewFlow(apSsid, apPsk string, p Provisioner, opts ...FlowOpt) (*Flow, error
 // being accepted; an invalid SSID or PSK returns ErrSSIDInvalid/ErrPSKInvalid.
 // If a previous submission is still pending, Submit returns ErrSubmissionPending.
 func (f *Flow) Submit(ssid, psk string) error {
-	if err := validateCredentials(ssid, psk); err != nil {
+	if err := provision.ValidateCredentials(ssid, psk); err != nil {
 		return err
 	}
 	select {
@@ -294,17 +267,17 @@ func (f *Flow) Begin(ctx context.Context) error {
 	}
 }
 
+// Finish releases the Flow's resources
 func (f *Flow) Finish() error {
 	f.closeSubs()
 
-	if f.ownsProvisioner {
-		return f.provisioner.Close()
-	}
+	// TODO: It might be worth having this function cleanup the flow state so that Flow.Finish() -> Flow.Begin()
+	// 	doesn't leave any stale state behind.
 
 	return nil
 }
 
-func (f *Flow) ListAccessPoints(ctx context.Context) ([]Network, error) {
+func (f *Flow) ListAccessPoints(ctx context.Context) ([]provision.Network, error) {
 	aps, err := f.provisioner.Scan(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("flow: listing access points: %w", err)
@@ -357,7 +330,7 @@ func (f *Flow) drainCreds() {
 // ctx is cancelled. Returns nil on ProvisionStateConnected, an error otherwise.
 // If ch closes without a terminal state (because the poller saw ctx.Done),
 // returns ctx.Err() so the caller can distinguish cancellation from a clean close.
-func drainUntilDone(ctx context.Context, ch <-chan ProvisionUpdate) error {
+func drainUntilDone(ctx context.Context, ch <-chan provision.Update) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -366,10 +339,10 @@ func drainUntilDone(ctx context.Context, ch <-chan ProvisionUpdate) error {
 			if !ok {
 				return ctx.Err()
 			}
-			if upd.State == ProvisionStateFailed {
+			if upd.State == provision.StateFailed {
 				return upd.Err
 			}
-			if upd.State == ProvisionStateConnected {
+			if upd.State == provision.StateConnected {
 				return nil
 			}
 		}

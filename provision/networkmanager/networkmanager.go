@@ -1,4 +1,4 @@
-package iotflow
+package networkmanager
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/dawsonalex/iotflow/provision"
 	"github.com/godbus/dbus/v5"
 	"github.com/google/uuid"
 )
@@ -15,7 +16,7 @@ const (
 	nmObjectPath = "/org/freedesktop/NetworkManager"
 )
 
-var _ Provisioner = &NetworkManagerProvisioner{}
+var _ provision.Provisioner = &NetworkManagerProvisioner{}
 
 // NetworkManagerProvisioner is a provisioner that uses NetworkManager as a backend.
 type NetworkManagerProvisioner struct {
@@ -65,8 +66,8 @@ func (b *NetworkManagerProvisioner) IsConnected(_ context.Context) (bool, error)
 	return state == nmDeviceStateActivated, nil
 }
 
-func (b *NetworkManagerProvisioner) EnableAPMode(ctx context.Context, ssid, psk string) (<-chan ProvisionUpdate, error) {
-	if err := validateCredentials(ssid, psk); err != nil {
+func (b *NetworkManagerProvisioner) EnableAPMode(ctx context.Context, ssid, psk string) (<-chan provision.Update, error) {
+	if err := provision.ValidateCredentials(ssid, psk); err != nil {
 		return nil, err
 	}
 
@@ -115,8 +116,8 @@ func (b *NetworkManagerProvisioner) DisableAPMode() error {
 	return nil
 }
 
-func (b *NetworkManagerProvisioner) ConnectToNetwork(ctx context.Context, ssid, psk string) (<-chan ProvisionUpdate, error) {
-	if err := validateCredentials(ssid, psk); err != nil {
+func (b *NetworkManagerProvisioner) ConnectToNetwork(ctx context.Context, ssid, psk string) (<-chan provision.Update, error) {
+	if err := provision.ValidateCredentials(ssid, psk); err != nil {
 		return nil, err
 	}
 
@@ -151,8 +152,8 @@ func (b *NetworkManagerProvisioner) Close() error {
 	return b.conn.Close()
 }
 
-func (b *NetworkManagerProvisioner) pollProvisionUpdates(ctx context.Context, tick time.Duration) <-chan ProvisionUpdate {
-	ch := make(chan ProvisionUpdate)
+func (b *NetworkManagerProvisioner) pollProvisionUpdates(ctx context.Context, tick time.Duration) <-chan provision.Update {
+	ch := make(chan provision.Update)
 	go func() {
 		t := time.NewTicker(tick)
 		defer t.Stop()
@@ -163,14 +164,14 @@ func (b *NetworkManagerProvisioner) pollProvisionUpdates(ctx context.Context, ti
 			case <-t.C:
 				state, err := getDeviceState(b.conn, b.ifacePath)
 				if err != nil {
-					ch <- ProvisionUpdate{State: ProvisionStateFailed, Err: err}
+					ch <- provision.Update{State: provision.StateFailed, Err: err}
 					return
 				}
 
 				update := toProvisionUpdate(state)
 				ch <- update
 
-				if update.State == ProvisionStateConnected || update.State == ProvisionStateFailed {
+				if update.State == provision.StateConnected || update.State == provision.StateFailed {
 					return
 				}
 			case <-ctx.Done():
@@ -181,20 +182,20 @@ func (b *NetworkManagerProvisioner) pollProvisionUpdates(ctx context.Context, ti
 	return ch
 }
 
-func toProvisionUpdate(s deviceState) ProvisionUpdate {
+func toProvisionUpdate(s deviceState) provision.Update {
 	switch s {
 	case nmDeviceStateActivated:
-		return ProvisionUpdate{State: ProvisionStateConnected}
+		return provision.Update{State: provision.StateConnected}
 	case nmDeviceStateFailed:
-		return ProvisionUpdate{State: ProvisionStateFailed, Err: errors.New("connection failed")}
+		return provision.Update{State: provision.StateFailed, Err: errors.New("connection failed")}
 	default:
-		return ProvisionUpdate{State: ProvisionStateConnecting}
+		return provision.Update{State: provision.StateConnecting}
 	}
 }
 
 const dbusErrNotAllowed = "org.freedesktop.NetworkManager.Device.NotAllowed"
 
-func (b *NetworkManagerProvisioner) Scan(ctx context.Context) ([]Network, error) {
+func (b *NetworkManagerProvisioner) Scan(ctx context.Context) ([]provision.Network, error) {
 	t, err := b.lastScanTime(ctx)
 	if err != nil {
 		return nil, err
@@ -215,7 +216,7 @@ func (b *NetworkManagerProvisioner) Scan(ctx context.Context) ([]Network, error)
 
 const nmAccessPointIface = "org.freedesktop.NetworkManager.AccessPoint"
 
-func (b *NetworkManagerProvisioner) getNetworkList(ctx context.Context) ([]Network, error) {
+func (b *NetworkManagerProvisioner) getNetworkList(ctx context.Context) ([]provision.Network, error) {
 	accessPointsVariant, err := b.conn.Object(nmBusName, b.ifacePath).GetProperty("org.freedesktop.NetworkManager.Device.Wireless.AccessPoints")
 	if err != nil {
 		return nil, fmt.Errorf("getting access points: %w", err)
@@ -227,7 +228,7 @@ func (b *NetworkManagerProvisioner) getNetworkList(ctx context.Context) ([]Netwo
 		return nil, fmt.Errorf("storing access points: %w", err)
 	}
 
-	networks := make([]Network, 0, len(accessPoints))
+	networks := make([]provision.Network, 0, len(accessPoints))
 	for _, apPath := range accessPoints {
 		ap := b.conn.Object(nmBusName, apPath)
 
@@ -249,12 +250,12 @@ func (b *NetworkManagerProvisioner) getNetworkList(ctx context.Context) ([]Netwo
 			continue
 		}
 
-		var security NetworkSecurity
+		var security provision.NetworkSecurity
 		if security, err = b.accessPointSecurity(apPath); err != nil {
 			continue
 		}
 
-		networks = append(networks, Network{
+		networks = append(networks, provision.Network{
 			SSID:     string(ssidBytes),
 			Signal:   strength,
 			Security: security,
@@ -265,35 +266,35 @@ func (b *NetworkManagerProvisioner) getNetworkList(ctx context.Context) ([]Netwo
 }
 
 // calculates the security that an access point has (wpa, wpa2, etc)
-func (b *NetworkManagerProvisioner) accessPointSecurity(apPath dbus.ObjectPath) (NetworkSecurity, error) {
+func (b *NetworkManagerProvisioner) accessPointSecurity(apPath dbus.ObjectPath) (provision.NetworkSecurity, error) {
 	flagsVariant, err := b.conn.Object(nmBusName, apPath).GetProperty("org.freedesktop.NetworkManager.AccessPoint.Flags")
 	if err != nil {
-		return NetworkSecurityNone, fmt.Errorf("getting security flags: %w", err)
+		return provision.NetworkSecurityNone, fmt.Errorf("getting security flags: %w", err)
 	}
 
 	var flags uint32
 	if err = flagsVariant.Store(&flags); err != nil {
-		return NetworkSecurityNone, fmt.Errorf("storing security flags: %w", err)
+		return provision.NetworkSecurityNone, fmt.Errorf("storing security flags: %w", err)
 	}
 
 	wpaSecVariant, err := b.conn.Object(nmBusName, apPath).GetProperty("org.freedesktop.NetworkManager.AccessPoint.WpaFlags")
 	if err != nil {
-		return NetworkSecurityNone, fmt.Errorf("getting WPA flags: %w", err)
+		return provision.NetworkSecurityNone, fmt.Errorf("getting WPA flags: %w", err)
 	}
 
 	var wpaFlags uint32
 	if err = wpaSecVariant.Store(&wpaFlags); err != nil {
-		return NetworkSecurityNone, fmt.Errorf("storing WPA flags: %w", err)
+		return provision.NetworkSecurityNone, fmt.Errorf("storing WPA flags: %w", err)
 	}
 
 	rsnFlagsVariant, err := b.conn.Object(nmBusName, apPath).GetProperty("org.freedesktop.NetworkManager.AccessPoint.RsnFlags")
 	if err != nil {
-		return NetworkSecurityNone, fmt.Errorf("getting RSN flags: %w", err)
+		return provision.NetworkSecurityNone, fmt.Errorf("getting RSN flags: %w", err)
 	}
 
 	var rsnFlags uint32
 	if err = rsnFlagsVariant.Store(&rsnFlags); err != nil {
-		return NetworkSecurityNone, fmt.Errorf("storing RSN flags: %w", err)
+		return provision.NetworkSecurityNone, fmt.Errorf("storing RSN flags: %w", err)
 	}
 
 	return newNetworkSecurity(flags, wpaFlags, rsnFlags), nil

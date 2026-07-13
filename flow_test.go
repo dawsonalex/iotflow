@@ -8,6 +8,7 @@ import (
 
 	"github.com/dawsonalex/iotflow"
 	"github.com/dawsonalex/iotflow/internal/iotflowtest"
+	"github.com/dawsonalex/iotflow/provision"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -46,7 +47,7 @@ func stateSeq(updates []iotflow.FlowUpdate) []iotflow.FlowState {
 }
 
 // newTestFlow creates a Flow backed by p.
-func newTestFlow(t *testing.T, p iotflow.Provisioner) *iotflow.Flow {
+func newTestFlow(t *testing.T, p provision.Provisioner) *iotflow.Flow {
 	t.Helper()
 	f, err := iotflow.NewFlow("test", "password", p)
 	assert.NoError(t, err)
@@ -75,10 +76,10 @@ func TestBegin_AlreadyConnected(t *testing.T) {
 func TestBegin_FullProvisioning(t *testing.T) {
 	f := newTestFlow(t, &iotflowtest.MockProvisioner{
 		IsConnectedFn: func(_ context.Context) (bool, error) { return false, nil },
-		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan iotflow.ProvisionUpdate, error) {
+		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan provision.Update, error) {
 			return iotflowtest.ConnectedCh(), nil
 		},
-		ConnectToNetworkFn: func(_ context.Context, _, _ string) (<-chan iotflow.ProvisionUpdate, error) {
+		ConnectToNetworkFn: func(_ context.Context, _, _ string) (<-chan provision.Update, error) {
 			return iotflowtest.ConnectedCh(), nil
 		},
 	})
@@ -113,10 +114,10 @@ func TestBegin_RetryOnConnectionFailure(t *testing.T) {
 
 	f := newTestFlow(t, &iotflowtest.MockProvisioner{
 		IsConnectedFn: func(_ context.Context) (bool, error) { return false, nil },
-		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan iotflow.ProvisionUpdate, error) {
+		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan provision.Update, error) {
 			return iotflowtest.ConnectedCh(), nil
 		},
-		ConnectToNetworkFn: func(_ context.Context, _, _ string) (<-chan iotflow.ProvisionUpdate, error) {
+		ConnectToNetworkFn: func(_ context.Context, _, _ string) (<-chan provision.Update, error) {
 			if callCount.Add(1) == 1 {
 				return iotflowtest.FailedCh(connErr), nil // first attempt fails
 			}
@@ -181,7 +182,7 @@ func TestBegin_EnableAPModeError(t *testing.T) {
 	backendErr := errors.New("radio blocked")
 	f := newTestFlow(t, &iotflowtest.MockProvisioner{
 		IsConnectedFn:  func(_ context.Context) (bool, error) { return false, nil },
-		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan iotflow.ProvisionUpdate, error) { return nil, backendErr },
+		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan provision.Update, error) { return nil, backendErr },
 	})
 
 	ch, unsub := f.Subscribe()
@@ -200,7 +201,7 @@ func TestBegin_DisableAPModeError(t *testing.T) {
 	backendErr := errors.New("cannot deactivate")
 	f := newTestFlow(t, &iotflowtest.MockProvisioner{
 		IsConnectedFn: func(_ context.Context) (bool, error) { return false, nil },
-		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan iotflow.ProvisionUpdate, error) {
+		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan provision.Update, error) {
 			return iotflowtest.ConnectedCh(), nil
 		},
 		DisableAPModeFn: func() error { return backendErr },
@@ -235,7 +236,7 @@ func TestBegin_DisableAPModeError(t *testing.T) {
 func TestBegin_ContextCancelledWhileWaiting(t *testing.T) {
 	f := newTestFlow(t, &iotflowtest.MockProvisioner{
 		IsConnectedFn: func(_ context.Context) (bool, error) { return false, nil },
-		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan iotflow.ProvisionUpdate, error) {
+		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan provision.Update, error) {
 			return iotflowtest.ConnectedCh(), nil
 		},
 	})
@@ -270,7 +271,7 @@ func TestSubmit_Success(t *testing.T) {
 
 func TestSubmit_InvalidCredentials(t *testing.T) {
 	f := newTestFlow(t, &iotflowtest.MockProvisioner{})
-	assert.ErrorIs(t, f.Submit(testNetSSID, "short"), iotflow.ErrPSKInvalid)
+	assert.ErrorIs(t, f.Submit(testNetSSID, "short"), provision.ErrPSKInvalid)
 }
 
 func TestSubmit_AlreadyPending(t *testing.T) {
@@ -343,10 +344,10 @@ func TestFinish_BorrowedProvisionerNotClosed(t *testing.T) {
 
 func TestNewFlow_InvalidAPCredentials(t *testing.T) {
 	_, err := iotflow.NewFlow("", testNetPSK, &iotflowtest.MockProvisioner{})
-	assert.ErrorIs(t, err, iotflow.ErrSSIDInvalid)
+	assert.ErrorIs(t, err, provision.ErrSSIDInvalid)
 
 	_, err = iotflow.NewFlow(testNetSSID, "short", &iotflowtest.MockProvisioner{})
-	assert.ErrorIs(t, err, iotflow.ErrPSKInvalid)
+	assert.ErrorIs(t, err, provision.ErrPSKInvalid)
 }
 
 // --- Begin: ConnectToNetwork synchronous-error paths ---
@@ -361,10 +362,10 @@ func TestBegin_RetryOnConnectError(t *testing.T) {
 
 	f := newTestFlow(t, &iotflowtest.MockProvisioner{
 		IsConnectedFn: func(_ context.Context) (bool, error) { return false, nil },
-		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan iotflow.ProvisionUpdate, error) {
+		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan provision.Update, error) {
 			return iotflowtest.ConnectedCh(), nil
 		},
-		ConnectToNetworkFn: func(_ context.Context, _, _ string) (<-chan iotflow.ProvisionUpdate, error) {
+		ConnectToNetworkFn: func(_ context.Context, _, _ string) (<-chan provision.Update, error) {
 			if callCount.Add(1) == 1 {
 				return nil, connErr // first attempt fails synchronously
 			}
@@ -410,10 +411,10 @@ func TestBegin_ContextCancelledDuringConnect(t *testing.T) {
 
 	f := newTestFlow(t, &iotflowtest.MockProvisioner{
 		IsConnectedFn: func(_ context.Context) (bool, error) { return false, nil },
-		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan iotflow.ProvisionUpdate, error) {
+		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan provision.Update, error) {
 			return iotflowtest.ConnectedCh(), nil
 		},
-		ConnectToNetworkFn: func(_ context.Context, _, _ string) (<-chan iotflow.ProvisionUpdate, error) {
+		ConnectToNetworkFn: func(_ context.Context, _, _ string) (<-chan provision.Update, error) {
 			cancel()
 			return nil, errors.New("activation failed")
 		},
@@ -444,14 +445,14 @@ func TestBegin_ContextCancelledDuringConnect(t *testing.T) {
 // never reaches a terminal state, and ctx is cancelled while draining it.
 func TestBegin_ContextCancelledDuringConnectChannel(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
-	blocked := make(chan iotflow.ProvisionUpdate) // never sends, never closes
+	blocked := make(chan provision.Update) // never sends, never closes
 
 	f := newTestFlow(t, &iotflowtest.MockProvisioner{
 		IsConnectedFn: func(_ context.Context) (bool, error) { return false, nil },
-		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan iotflow.ProvisionUpdate, error) {
+		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan provision.Update, error) {
 			return iotflowtest.ConnectedCh(), nil
 		},
-		ConnectToNetworkFn: func(_ context.Context, _, _ string) (<-chan iotflow.ProvisionUpdate, error) {
+		ConnectToNetworkFn: func(_ context.Context, _, _ string) (<-chan provision.Update, error) {
 			return blocked, nil
 		},
 	})
@@ -489,10 +490,10 @@ func TestBegin_DropsStaleCredentialsOnRetry(t *testing.T) {
 	var f *iotflow.Flow
 	f = newTestFlow(t, &iotflowtest.MockProvisioner{
 		IsConnectedFn: func(_ context.Context) (bool, error) { return false, nil },
-		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan iotflow.ProvisionUpdate, error) {
+		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan provision.Update, error) {
 			return iotflowtest.ConnectedCh(), nil
 		},
-		ConnectToNetworkFn: func(_ context.Context, ssid, _ string) (<-chan iotflow.ProvisionUpdate, error) {
+		ConnectToNetworkFn: func(_ context.Context, ssid, _ string) (<-chan provision.Update, error) {
 			if callCount.Add(1) == 1 {
 				// A stale credential arrives while the first connect is in
 				// flight; the retry must drop it instead of reusing it.

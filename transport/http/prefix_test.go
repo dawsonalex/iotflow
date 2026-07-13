@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/dawsonalex/iotflow"
+	"github.com/dawsonalex/iotflow/provision"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -19,7 +20,7 @@ import (
 // reaches the handler yields 404 from the mux instead.
 type stubFlow struct{}
 
-func (stubFlow) ListAccessPoints(ctx context.Context) ([]iotflow.Network, error) {
+func (stubFlow) ListAccessPoints(ctx context.Context) ([]provision.Network, error) {
 	panic("unimplemented")
 }
 

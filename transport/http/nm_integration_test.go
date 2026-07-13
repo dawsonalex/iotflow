@@ -29,6 +29,8 @@ import (
 
 	"github.com/dawsonalex/iotflow"
 	"github.com/dawsonalex/iotflow/internal/nmfake"
+	"github.com/dawsonalex/iotflow/provision"
+	"github.com/dawsonalex/iotflow/provision/networkmanager"
 )
 
 // fake is the shared fake NetworkManager for this package's integration tests.
@@ -71,7 +73,13 @@ func TestMain(m *testing.M) {
 // test transparently reconnect the shared system bus) at test end.
 func newFlowServer(t *testing.T, iface string) (*httptest.Server, *iotflow.Flow) {
 	t.Helper()
-	flow, err := iotflow.NewNetworkManagerFlow("iot-setup", "ap-password", iface)
+	nmProvisioner, err := networkmanager.NewNetworkManagerProvisioner(iface)
+	if err != nil {
+		t.Fatalf("NewNetworkManagerProvisioner(%q): %v", iface, err)
+	}
+	t.Cleanup(func() { _ = nmProvisioner.Close() })
+
+	flow, err := iotflow.NewFlow("iot-setup", "ap-password", nmProvisioner)
 	if err != nil {
 		t.Fatalf("NewNetworkManagerFlow(%q): %v", iface, err)
 	}
@@ -259,20 +267,20 @@ func TestListAccessPointsOverHTTP(t *testing.T) {
 	}
 
 	var body struct {
-		Networks []iotflow.Network `json:"networks"`
+		Networks []provision.Network `json:"networks"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decoding /aps response: %v", err)
 	}
 
-	got := make(map[string]iotflow.NetworkSecurity, len(body.Networks))
+	got := make(map[string]provision.NetworkSecurity, len(body.Networks))
 	for _, n := range body.Networks {
 		got[n.SSID] = n.Security
 	}
-	want := map[string]iotflow.NetworkSecurity{
-		"open-net": iotflow.NetworkSecurityNone,
-		"wpa2-net": iotflow.NetworkSecurityWpaPsk,
-		"sae-net":  iotflow.NetworkSecuritySae,
+	want := map[string]provision.NetworkSecurity{
+		"open-net": provision.NetworkSecurityNone,
+		"wpa2-net": provision.NetworkSecurityWpaPsk,
+		"sae-net":  provision.NetworkSecuritySae,
 	}
 	for ssid, wantSec := range want {
 		if got[ssid] != wantSec {

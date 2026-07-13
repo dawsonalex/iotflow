@@ -16,8 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dawsonalex/iotflow"
 	"github.com/dawsonalex/iotflow/internal/nmfake"
+	"github.com/dawsonalex/iotflow/provision"
+	"github.com/dawsonalex/iotflow/provision/networkmanager"
 	"github.com/godbus/dbus/v5"
 )
 
@@ -59,9 +60,9 @@ func TestMain(m *testing.M) {
 // newProvisioner builds a provisioner against the shared fake and closes it at
 // test end. Closing disconnects the cached system-bus connection; the next
 // construction transparently reconnects (godbus re-reads the env address).
-func newProvisioner(t *testing.T, iface string) *iotflow.NetworkManagerProvisioner {
+func newProvisioner(t *testing.T, iface string) *networkmanager.NetworkManagerProvisioner {
 	t.Helper()
-	p, err := iotflow.NewNetworkManagerProvisioner(iface)
+	p, err := networkmanager.NewNetworkManagerProvisioner(iface)
 	if err != nil {
 		t.Fatalf("NewNetworkManagerProvisioner(%q): %v", iface, err)
 	}
@@ -70,9 +71,9 @@ func newProvisioner(t *testing.T, iface string) *iotflow.NetworkManagerProvision
 }
 
 // drain reads a ProvisionUpdate stream to completion and returns the last update.
-func drain(t *testing.T, ch <-chan iotflow.ProvisionUpdate) iotflow.ProvisionUpdate {
+func drain(t *testing.T, ch <-chan provision.Update) provision.Update {
 	t.Helper()
-	var last iotflow.ProvisionUpdate
+	var last provision.Update
 	seen := false
 	timeout := time.After(3 * time.Second)
 	for {
@@ -126,13 +127,13 @@ func TestDeviceDiscovery(t *testing.T) {
 	})
 
 	t.Run("explicit non-wifi interface is rejected", func(t *testing.T) {
-		if _, err := iotflow.NewNetworkManagerProvisioner("eth0"); err == nil {
+		if _, err := networkmanager.NewNetworkManagerProvisioner("eth0"); err == nil {
 			t.Fatal("expected an error for a non-WiFi interface, got nil")
 		}
 	})
 
 	t.Run("unknown interface is rejected", func(t *testing.T) {
-		if _, err := iotflow.NewNetworkManagerProvisioner("nope0"); err == nil {
+		if _, err := networkmanager.NewNetworkManagerProvisioner("nope0"); err == nil {
 			t.Fatal("expected an error for an unknown interface, got nil")
 		}
 	})
@@ -164,7 +165,7 @@ func TestEnableAndDisableAPMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnableAPMode: %v", err)
 	}
-	if final := drain(t, ch); final.State != iotflow.ProvisionStateConnected {
+	if final := drain(t, ch); final.State != provision.StateConnected {
 		t.Fatalf("final AP state = %v (err %v), want Connected", final.State, final.Err)
 	}
 
@@ -189,10 +190,10 @@ func TestConnectToNetwork(t *testing.T) {
 	tests := []struct {
 		name   string
 		script []nmfake.StateStep
-		want   iotflow.ProvisionState
+		want   provision.State
 	}{
-		{"reaches connected on success", nmfake.ConnectScript(), iotflow.ProvisionStateConnected},
-		{"reaches failed on failure", nmfake.FailScript(), iotflow.ProvisionStateFailed},
+		{"reaches connected on success", nmfake.ConnectScript(), provision.StateConnected},
+		{"reaches failed on failure", nmfake.FailScript(), provision.StateFailed},
 	}
 
 	for _, tc := range tests {
@@ -251,17 +252,17 @@ func TestScan(t *testing.T) {
 			t.Fatalf("Scan: %v", err)
 		}
 
-		security := make(map[string]iotflow.NetworkSecurity, len(nets))
+		security := make(map[string]provision.NetworkSecurity, len(nets))
 		signal := make(map[string]uint8, len(nets))
 		for _, n := range nets {
 			security[n.SSID] = n.Security
 			signal[n.SSID] = n.Signal
 		}
 
-		wantSecurity := map[string]iotflow.NetworkSecurity{
-			"open-net": iotflow.NetworkSecurityNone,
-			"wpa2-net": iotflow.NetworkSecurityWpaPsk,
-			"sae-net":  iotflow.NetworkSecuritySae,
+		wantSecurity := map[string]provision.NetworkSecurity{
+			"open-net": provision.NetworkSecurityNone,
+			"wpa2-net": provision.NetworkSecurityWpaPsk,
+			"sae-net":  provision.NetworkSecuritySae,
 		}
 		for ssid, want := range wantSecurity {
 			if got := security[ssid]; got != want {

@@ -8,6 +8,7 @@ import (
 
 	"github.com/dawsonalex/iotflow"
 	"github.com/dawsonalex/iotflow/internal/iotflowtest"
+	"github.com/dawsonalex/iotflow/provision"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -20,7 +21,7 @@ func newWaitingFlow(t *testing.T) *iotflow.Flow {
 	t.Helper()
 	f, err := iotflow.NewFlow("test", "password", &iotflowtest.MockProvisioner{
 		IsConnectedFn: func(_ context.Context) (bool, error) { return false, nil },
-		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan iotflow.ProvisionUpdate, error) {
+		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan provision.Update, error) {
 			return iotflowtest.ConnectedCh(), nil
 		},
 	})
