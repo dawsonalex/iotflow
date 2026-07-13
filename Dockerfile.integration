@@ -1,0 +1,29 @@
+# Dockerfile.integration runs the tagged integration suite on hosts that don't
+# have dbus-daemon available (most CI runners). The tests still start their own
+# private bus via internal/nmfake.StartBus — this image just guarantees the
+# dbus-daemon binary is on PATH. There is no system bus and no real
+# NetworkManager in the container; the fake owns the bus name on a private socket.
+#
+# Build + run from the repo root:
+#   docker build -f Dockerfile.integration -t iotflow-integration .
+#   docker run --rm iotflow-integration
+# or simply: make test-integration-docker
+FROM golang:1.25
+
+# dbus provides the dbus-daemon binary; gcc is needed because -race builds cgo.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends dbus gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+# Prime the module cache separately so dependency downloads are cached across
+# source-only changes.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# Default command runs the whole tagged suite under the race detector, exactly
+# as `make test-integration` does on a host with dbus-daemon installed.
+CMD ["go", "test", "-tags", "integration", "-race", "./..."]

@@ -1,0 +1,27 @@
+# Keep the Docker build context (and image) limited to what the integration
+# tests actually compile. Everything here is either irrelevant to the build or
+# something we must never ship in an image.
+
+# Version control and IDE/editor state
+.git
+.gitignore
+.idea
+.vscode
+.claude
+
+# Local build artifact (BIN_NAME in the makefile, built to the repo root)
+/example
+
+# Docker files themselves — not needed inside the build
+Dockerfile*
+.dockerignore
+
+# Docs
+README.md
+
+# Local environment / secrets — never copy these into an image
+.env
+*.env
+*.local
+*.pem
+*.key

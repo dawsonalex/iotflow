@@ -1,4 +1,6 @@
-.PHONY: help build run test clean
+.PHONY: help build run test test-integration test-integration-docker clean
+
+INTEGRATION_IMAGE = iotflow-integration
 
 # ROOT_DIR is the path of the makefile (including trailing slash)
 ROOT_DIR := $(dir $(realpath $(lastword $(MAKEFILE_LIST))))
@@ -31,6 +33,16 @@ commit-check: fmt vet lint test ## Run all checks before committing
 test: ## Run tests
 	@echo "Running tests..."
 	@go test -v -race ./...
+
+test-integration: ## Run integration tests against the fake NetworkManager (needs dbus-daemon)
+	@echo "Running integration tests..."
+	@go test -tags integration -race ./...
+
+test-integration-docker: ## Run the integration tests in a container (for hosts without dbus-daemon)
+	@echo "Building integration test image..."
+	@docker build -f Dockerfile.integration -t '${INTEGRATION_IMAGE}' .
+	@echo "Running integration tests in container..."
+	@docker run --rm '${INTEGRATION_IMAGE}'
 
 build: ## Build the binary
 	go build -C '${ROOT_DIR}cmd/example' -o '${ROOT_DIR}${BIN_NAME}'
