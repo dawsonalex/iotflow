@@ -28,7 +28,7 @@ var _ provision.Provisioner = (*MockProvisioner)(nil)
 type MockProvisioner struct {
 	IsConnectedFn      func(context.Context) (bool, error)
 	EnableAPModeFn     func(context.Context, string, string) (<-chan provision.Update, error)
-	DisableAPModeFn    func() error
+	DisableAPModeFn    func(context.Context) error
 	ConnectToNetworkFn func(context.Context, string, string) (<-chan provision.Update, error)
 	ScanFn             func(context.Context) ([]provision.Network, error)
 	CloseFn            func() error
@@ -46,9 +46,9 @@ func (m *MockProvisioner) EnableAPMode(ctx context.Context, ssid, psk string) (<
 	return m.EnableAPModeFn(ctx, ssid, psk)
 }
 
-func (m *MockProvisioner) DisableAPMode() error {
+func (m *MockProvisioner) DisableAPMode(ctx context.Context) error {
 	if m.DisableAPModeFn != nil {
-		return m.DisableAPModeFn()
+		return m.DisableAPModeFn(ctx)
 	}
 	return nil
 }

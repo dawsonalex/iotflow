@@ -180,9 +180,11 @@ type FlowUpdate struct {
 
 `FlowState` transitions through: `Idle` → `CheckingConnection` → `EnablingAP` →
 `WaitingForCredentials` → `DisablingAP` → `Connecting`, ending in one of the
-terminal states `Connected` (device was already online at `Begin`),
-`Provisioned` (completed the full flow), or `Failed`. `FlowUpdate` marshals to
-JSON as `{"state": "...", "error": "..."}` for transports that stream it.
+terminal states `Provisioned` or `Failed`. `Provisioned` means the device is on
+a network, whether it was already online at `Begin` or reached it through the
+full flow — a subscriber that needs to tell those apart can look at whether
+`EnablingAP` was ever emitted. `FlowUpdate` marshals to JSON as
+`{"state": "...", "error": "..."}` for transports that stream it.
 
 ## API
 

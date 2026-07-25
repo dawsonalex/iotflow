@@ -79,6 +79,10 @@ func newTestFlow(t *testing.T, p provision.Provisioner) *iotflow.Flow {
 
 // --- Begin: terminal-success paths ---
 
+// TestBegin_AlreadyConnected covers the short-circuit path. It reaches the same
+// terminal StateProvisioned as a full run — a subscriber learns only that the
+// device is on a network, not which route it took there — but does so without
+// ever bringing the AP up.
 func TestBegin_AlreadyConnected(t *testing.T) {
 	f := newTestFlow(t, &iotflowtest.MockProvisioner{
 		IsConnectedFn: func(_ context.Context) (bool, error) { return true, nil },
@@ -86,13 +90,13 @@ func TestBegin_AlreadyConnected(t *testing.T) {
 
 	sub, unsub := f.Subscribe()
 	defer unsub()
-	results, _ := watchUpdates(t, sub, iotflow.StateConnected)
+	results, _ := watchUpdates(t, sub, iotflow.StateProvisioned)
 
 	assert.NoError(t, f.Begin(t.Context()))
 	assert.Equal(t, []iotflow.FlowState{
 		iotflow.StateIdle,
 		iotflow.StateCheckingConnection,
-		iotflow.StateConnected,
+		iotflow.StateProvisioned,
 	}, stateSeq(waitFor(t, results, "the update stream to close")))
 }
 
@@ -227,7 +231,7 @@ func TestBegin_DisableAPModeError(t *testing.T) {
 		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan provision.Update, error) {
 			return iotflowtest.ConnectedCh(), nil
 		},
-		DisableAPModeFn: func() error { return backendErr },
+		DisableAPModeFn: func(_ context.Context) error { return backendErr },
 	})
 
 	ch, unsub := f.Subscribe()
@@ -314,7 +318,7 @@ func beginWaitingFlow(t *testing.T) *iotflow.Flow {
 	go func() { beginErr <- f.Begin(ctx) }()
 	t.Cleanup(func() {
 		cancel()
-		waitFor(t, beginErr, "Begin to return after cancellation")
+		_ = waitFor(t, beginErr, "Begin to return after cancellation")
 	})
 
 	waitFor(t, waiting, "StateWaitingForCredentials")
@@ -404,7 +408,7 @@ func TestSubscribe_AfterCompletionIsClosed(t *testing.T) {
 
 	upd, ok := <-ch
 	assert.True(t, ok)
-	assert.Equal(t, iotflow.StateConnected, upd.State)
+	assert.Equal(t, iotflow.StateProvisioned, upd.State)
 
 	_, ok = <-ch
 	assert.False(t, ok)

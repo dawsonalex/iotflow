@@ -100,7 +100,7 @@ func (b *Provisioner) EnableAPMode(ctx context.Context, ssid, psk string) (<-cha
 	return b.pollProvisionUpdates(ctx, 100*time.Millisecond), nil
 }
 
-func (b *Provisioner) DisableAPMode() error {
+func (b *Provisioner) DisableAPMode(ctx context.Context) error {
 	if b.activeConn == "" {
 		return errors.New("no active AP connection")
 	}
@@ -164,12 +164,20 @@ func (b *Provisioner) pollProvisionUpdates(ctx context.Context, tick time.Durati
 			case <-t.C:
 				state, err := getDeviceState(b.conn, b.ifacePath)
 				if err != nil {
-					ch <- provision.Update{State: provision.StateFailed, Err: err}
+					select {
+					case ch <- provision.Update{State: provision.StateFailed, Err: err}:
+					case <-ctx.Done():
+					}
+
 					return
 				}
 
 				update := toProvisionUpdate(state)
-				ch <- update
+				select {
+				case ch <- update:
+				case <-ctx.Done():
+					return
+				}
 
 				if update.State == provision.StateConnected || update.State == provision.StateFailed {
 					return

@@ -178,7 +178,7 @@ func TestEnableAndDisableAPMode(t *testing.T) {
 	assertVariantString(t, settings, "802-11-wireless", "mode", "ap")
 	assertVariantString(t, settings, "ipv4", "method", "shared")
 
-	if err := p.DisableAPMode(); err != nil {
+	if err := p.DisableAPMode(context.Background()); err != nil {
 		t.Fatalf("DisableAPMode: %v", err)
 	}
 	if got := fake.DeactivateCalls(); got != 1 {

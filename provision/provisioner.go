@@ -11,7 +11,7 @@ import (
 type Provisioner interface {
 	IsConnected(context.Context) (bool, error)
 	EnableAPMode(context.Context, string, string) (<-chan Update, error)
-	DisableAPMode() error
+	DisableAPMode(ctx context.Context) error
 	ConnectToNetwork(context.Context, string, string) (<-chan Update, error)
 	Close() error
 	Scan(context.Context) ([]Network, error)

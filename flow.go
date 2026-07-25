@@ -20,8 +20,7 @@ const (
 	StateWaitingForCredentials                  // AP is up; waiting for a credential submission
 	StateDisablingAP                            // DisableAPMode in progress
 	StateConnecting                             // ConnectToNetwork in progress
-	StateConnected                              // terminal: device was already connected at Begin
-	StateProvisioned                            // terminal: device completed the full provisioning flow
+	StateProvisioned                            // terminal: device is on a network, whether it was already connected at Begin or completed the flow
 	StateFailed                                 // terminal: unrecoverable error
 )
 
@@ -39,8 +38,6 @@ func (s FlowState) String() string {
 		return "DisablingAP"
 	case StateConnecting:
 		return "Connecting"
-	case StateConnected:
-		return "Connected"
 	case StateProvisioned:
 		return "Provisioned"
 	case StateFailed:
@@ -86,6 +83,10 @@ var (
 	// ErrNotAwaitingCredentials is returned by Submit when the Flow is not in a state to
 	// accept new credentials.
 	ErrNotAwaitingCredentials = errors.New("not in StateWaitingForCredentials")
+
+	// ErrUpdateChanClosedPreemptively is returned when a flow state channel was closed, but the flow did not reach
+	// a terminal state.
+	ErrUpdateChanClosedPreemptively = errors.New("update channel closed before reaching a terminal state")
 )
 
 // Flow orchestrates the full WiFi provisioning lifecycle: checking connection
@@ -226,7 +227,10 @@ func (f *Flow) Begin(ctx context.Context) error {
 				return f.fail(err)
 			}
 			if connected {
-				f.emit(FlowUpdate{State: StateConnected})
+				// Already on a network: the device is provisioned, it just
+				// didn't need this run to get there. Subscribers see the same
+				// terminal state either way.
+				f.emit(FlowUpdate{State: StateProvisioned})
 				return nil
 			}
 			state = StateEnablingAP
@@ -254,7 +258,7 @@ func (f *Flow) Begin(ctx context.Context) error {
 			}
 
 		case StateDisablingAP:
-			if err := f.provisioner.DisableAPMode(); err != nil {
+			if err := f.provisioner.DisableAPMode(ctx); err != nil {
 				return f.fail(err)
 			}
 			state = StateConnecting
@@ -350,7 +354,8 @@ func (f *Flow) drainCreds() {
 // drainUntilDone reads from ch until a terminal ProvisionState is reached or
 // ctx is cancelled. Returns nil on ProvisionStateConnected, an error otherwise.
 // If ch closes without a terminal state (because the poller saw ctx.Done),
-// returns ctx.Err() so the caller can distinguish cancellation from a clean close.
+// returns ctx.Err() is the context is cancelled, or ErrUpdateChanClosedPreemptively
+// if the update channel is closed before a terminal state is reached.
 func drainUntilDone(ctx context.Context, ch <-chan provision.Update) error {
 	for {
 		select {
@@ -358,7 +363,10 @@ func drainUntilDone(ctx context.Context, ch <-chan provision.Update) error {
 			return ctx.Err()
 		case upd, ok := <-ch:
 			if !ok {
-				return ctx.Err()
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				return ErrUpdateChanClosedPreemptively
 			}
 			if upd.State == provision.StateFailed {
 				return upd.Err
