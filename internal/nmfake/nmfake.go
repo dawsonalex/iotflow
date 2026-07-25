@@ -198,6 +198,11 @@ func (nm *NM) SetDeviceState(path dbus.ObjectPath, state uint32) {
 	d.props.SetMust(ifaceDevice, "State", state)
 }
 
+// ForceDeviceError forces the interface at path to error when it is accessed.
+func (nm *NM) ForceDeviceError(path dbus.ObjectPath) {
+	_ = nm.conn.Export(nil, path, "org.freedesktop.DBus.Properties")
+}
+
 // SetAccessPoints replaces the scan list reported for a device.
 func (nm *NM) SetAccessPoints(path dbus.ObjectPath, aps []AP) {
 	d := nm.device(path)

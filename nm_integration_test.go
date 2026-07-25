@@ -20,6 +20,7 @@ import (
 	"github.com/dawsonalex/iotflow/provision"
 	"github.com/dawsonalex/iotflow/provision/networkmanager"
 	"github.com/godbus/dbus/v5"
+	"github.com/stretchr/testify/assert"
 )
 
 // fake is the shared fake NetworkManager. One bus and one fake serve the whole
@@ -289,4 +290,45 @@ func TestScan(t *testing.T) {
 			t.Fatalf("Scan returned %+v, want the single cached network", nets)
 		}
 	})
+}
+
+func TestPollProvisionUpdatesErrorClosesChannel(t *testing.T) {
+	fake.Reset()
+	dev := fake.AddWiFiDevice("wlan0")
+	p := newProvisioner(t, "wlan0")
+
+	ch, err := p.ConnectToNetwork(context.Background(), "home-wifi", "password123")
+	assert.Nil(t, err)
+
+	// This only works because the networkmanager.Provisioner is polling every 100ms.
+	// We're expecting ForceDeviceError to run before the first poll, so it comes back
+	// with an error.
+	fake.ForceDeviceError(dev)
+
+	updates := waitForClose(t, ch)
+
+	// we should see exactly one item, just the failure, and it should have an error.
+	assert.Equal(t, 1, len(updates))
+	assert.NotNil(t, updates[0].Err)
+	assert.Equal(t, updates[0].State, provision.StateFailed)
+}
+
+// waitForClose reads from ch until it is either closed, or waitTimeout is reached,
+// in which case t is failed. When ch is closed, a slice of T is returned.
+func waitForClose[T any](t *testing.T, ch <-chan T) []T {
+	t.Helper()
+
+	items := make([]T, 0)
+	timeout := time.After(waitTimeout)
+	for {
+		select {
+		case v, ok := <-ch:
+			if !ok {
+				return items
+			}
+			items = append(items, v)
+		case <-timeout:
+			t.Fatalf("timed out after %s waiting for channel to close", waitTimeout)
+		}
+	}
 }
