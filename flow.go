@@ -354,7 +354,7 @@ func (f *Flow) drainCreds() {
 // drainUntilDone reads from ch until a terminal ProvisionState is reached or
 // ctx is cancelled. Returns nil on ProvisionStateConnected, an error otherwise.
 // If ch closes without a terminal state (because the poller saw ctx.Done),
-// returns ctx.Err() is the context is cancelled, or ErrUpdateChanClosedPrematurely
+// returns ctx.Err() if the context is cancelled, or ErrUpdateChanClosedPrematurely
 // if the update channel is closed before a terminal state is reached.
 func drainUntilDone(ctx context.Context, ch <-chan provision.Update) error {
 	for {

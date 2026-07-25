@@ -191,7 +191,7 @@ full flow — a subscriber that needs to tell those apart can look at whether
 ### Backend
 
 ```
-NewNetworkManagerProvisioner(iface string) (*NetworkManagerProvisioner, error)
+netowrkmanager.NewProvisioner(iface string) (*NetworkManagerProvisioner, error)
 
 type Provisioner interface {
     IsConnected(ctx context.Context) (bool, error)
@@ -199,6 +199,7 @@ type Provisioner interface {
     DisableAPMode(ctx context.Context) error
     ConnectToNetwork(ctx context.Context, ssid, psk string) (<-chan ProvisionUpdate, error)
     Close() error
+	Scan(context.Context) ([]Network, error)
 }
 ```
 
@@ -280,5 +281,3 @@ f, err := iotflow.NewFlow("iotflow-setup", "setup-password", p)
 ```
 
 The `Flow` type and all provisioning logic are backend-agnostic.
-</content>
-</invoke>
