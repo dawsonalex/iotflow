@@ -1,8 +1,10 @@
 # iotflow
 
-A Go library for WiFi provisioning on Linux IoT devices using the Soft AP flow.
+A Go library for WiFi provisioning on Linux IoT devices using a Soft AP flow.
 
-The typical problem: a device ships with no network credentials. Rather than requiring SSH access or a config file, iotflow puts the device into access point mode so a user can connect to it directly and supply credentials via a web interface. Once credentials are received, the device switches to station mode and joins the target network.
+The typical problem: a device ships with no network credentials. Rather than requiring SSH access or a config file, 
+iotflow puts the device into access point mode so a user can connect to it directly and supply credentials via a web interface. 
+Once credentials are received, the device switches to station mode and joins the target network.
 
 ```
 Device boots, no network credentials
@@ -48,89 +50,14 @@ iotflow is built from two layers that you compose:
   the AP, wait for station credentials, tear the AP down, and connect. If the
   connection attempt fails it loops back into AP mode so the user can try again.
 
-A `Flow` knows nothing about *how* credentials reach it or *how* progress is
-reported. Credentials arrive through `Submit` and progress is observed through
-`Subscribe`; a transport adapts those two seams to a wire protocol. The
-`transport/http` subpackage is one such transport (HTTP + Server-Sent Events).
-
 ## Usage
 
-### Driving a Flow directly
-
-There are two ways to construct a `Flow`, differing only in who owns the
-backend's lifecycle:
-
-- **`NewNetworkManagerFlow`** — a convenience constructor that builds a
-  `NetworkManagerProvisioner` internally. The `Flow` *owns* that backend, so
-  `Finish` closes it for you.
-- **`NewFlow`** — you supply your own `Provisioner`. The `Flow` does **not** take
-  ownership; you are responsible for closing the provisioner yourself (typically
-  with `defer p.Close()`). Use this for a custom backend or a provisioner shared
-  across flows.
-
-Both take the device's own AP credentials (`apSSID`, `apPSK`) up front; they are
-validated before anything else happens.
-
-#### Managed backend (recommended)
-
-```go
-package main
-
-import (
-    "context"
-    "log"
-
-    "github.com/dawsonalex/iotflow"
-)
-
-func main() {
-    // Builds the NetworkManager backend internally. Pass "" for the interface
-    // to auto-discover the first WiFi device, or a name (e.g. "wlan0") to pin to
-    // a specific adapter. The Flow owns this backend.
-    f, err := iotflow.NewNetworkManagerFlow("iotflow-setup", "setup-password", "wlan0")
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer f.Finish() // closes the backend the Flow created
-
-    // Observe state transitions. Subscribe before Begin so no updates are missed.
-    go func() {
-        for upd := range f.Subscribe() {
-            if upd.Err != nil {
-                log.Printf("flow error: %v", upd.Err)
-                continue
-            }
-            log.Printf("state: %s", upd.State)
-        }
-    }()
-
-    // Feed station credentials in once you have them (e.g. from your own
-    // transport). Submit is non-blocking and safe for concurrent use.
-    go func() {
-        ssid, psk := receiveCredentials()
-        if err := f.Submit(ssid, psk); err != nil {
-            log.Printf("submit rejected: %v", err)
-        }
-    }()
-
-    // Begin blocks until the device is connected or an unrecoverable error
-    // occurs. It must be called exactly once per Flow.
-    if err := f.Begin(context.Background()); err != nil {
-        log.Fatalf("provisioning failed: %v", err)
-    }
-    log.Println("provisioned")
-}
-```
-
-#### Bring your own Provisioner
-
-When you construct the `Provisioner` yourself and pass it to `NewFlow`, the
-`Flow` will not close it — so you must manage its lifecycle. Note the extra
-`defer p.Close()`:
+Cnstruct a `Provisioner` and pass it to `NewFlow`. You must call `Close()` on the
+`Provisioner` to clean up it's resources when the flow is complete.
 
 ```go
 func main() {
-    p, err := iotflow.NewNetworkManagerProvisioner("wlan0")
+    p, err := networkManager.NewProvisioner("wlan0")
     if err != nil {
         log.Fatal(err)
     }
@@ -143,19 +70,28 @@ func main() {
     }
     defer f.Finish()
 
-    // ... Subscribe / Submit / Begin exactly as above.
+    // Call Subscribe() to observe changes in state
+	for update := range f.Subscribe() {
+        fmt.Printf("state: %v\n", update.State)
+    }
+	
+	// Call Begin() to start the flow
+	if err := f.Begin(context.Background()); err != nil {
+		log.Fatal(err)
+	}
 }
 ```
 
 ### Exposing a Flow over HTTP
 
 The `transport/http` subpackage runs an HTTP server alongside a `Flow`. It serves
-two endpoints:
+three endpoints:
 
-- `POST /credentials` — accepts `{"ssid": "...", "psk": "..."}` and forwards it
+- `POST /credentials` - accepts `{"ssid": "...", "psk": "..."}` and forwards it
   to `Flow.Submit`. Returns `202 Accepted` on success, `400` for invalid
   credentials, `409` if a submission is already pending.
-- `GET /events` — a Server-Sent Events stream of `FlowUpdate`s as they happen.
+- `GET /events` - a Server-Sent Events stream of `FlowUpdate`s as they happen.
+- `GET /aps` - A list of the APs visisble to the device.
 
 ```go
 package main
@@ -170,7 +106,13 @@ import (
 )
 
 func main() {
-    f, err := iotflow.NewNetworkManagerFlow("iotflow-setup", "setup-password", "wlan0")
+	p, err := networkmanager.NewProvisioner("wlan0")
+	if err != nil {
+		log.Fatal(err)
+	}
+    defer p.Close()
+	
+    f, err := iotflow.NewNetworkManagerFlow("iotflow-setup", "setup-password", p)
     if err != nil {
         log.Fatal(err)
     }
@@ -194,15 +136,8 @@ func main() {
 ### Embedding the endpoints in your own server
 
 If you'd rather mount the provisioning endpoints into a server you already run,
-use `NewHandler(f, opts...)`. It returns an `http.Handler` for the two endpoints
-above and starts no listener of its own.
-
-Unlike `Serve`, `NewHandler` only adapts HTTP to `Submit`/`Subscribe` — it does
-**not** run the state machine. You own the `Flow` lifecycle: start it with
-`Begin` (once, in its own goroutine) and tear it down with `Finish`. Without a
-running `Begin` the handler still mounts, but `/events` never emits and the first
-`/credentials` POST is accepted while every later one returns `409` — nothing is
-draining submissions.
+use `NewHandler(f, opts...)`. It returns an `http.Handler` for the endpoints
+above without starting a listener.
 
 ```go
 func provisioningRoutes(f *iotflow.Flow) http.Handler {

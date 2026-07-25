@@ -16,19 +16,19 @@ const (
 	nmObjectPath = "/org/freedesktop/NetworkManager"
 )
 
-var _ provision.Provisioner = &NetworkManagerProvisioner{}
+var _ provision.Provisioner = &Provisioner{}
 
-// NetworkManagerProvisioner is a provisioner that uses NetworkManager as a backend.
-type NetworkManagerProvisioner struct {
+// Provisioner is a provisioner that uses NetworkManager as a backend.
+type Provisioner struct {
 	conn       *dbus.Conn
 	ifacePath  dbus.ObjectPath
 	activeConn dbus.ObjectPath
 }
 
-// NewNetworkManagerProvisioner creates a new Provisioner that operates on NetworkManager over DBus.
+// NewProvisioner creates a new Provisioner that operates on NetworkManager over DBus.
 // The returned provisioner must be closed by the caller when provisioning is complete by
 // calling `Close()` on the returned Provisioner.
-func NewNetworkManagerProvisioner(iface string) (*NetworkManagerProvisioner, error) {
+func NewProvisioner(iface string) (*Provisioner, error) {
 	conn, err := dbus.SystemBus()
 	if err != nil {
 		return nil, fmt.Errorf("connecting to system bus: %w", err)
@@ -55,10 +55,10 @@ func NewNetworkManagerProvisioner(iface string) (*NetworkManagerProvisioner, err
 		}
 	}
 
-	return &NetworkManagerProvisioner{conn: conn, ifacePath: path}, nil
+	return &Provisioner{conn: conn, ifacePath: path}, nil
 }
 
-func (b *NetworkManagerProvisioner) IsConnected(_ context.Context) (bool, error) {
+func (b *Provisioner) IsConnected(_ context.Context) (bool, error) {
 	state, err := getDeviceState(b.conn, b.ifacePath)
 	if err != nil {
 		return false, err
@@ -66,7 +66,7 @@ func (b *NetworkManagerProvisioner) IsConnected(_ context.Context) (bool, error)
 	return state == nmDeviceStateActivated, nil
 }
 
-func (b *NetworkManagerProvisioner) EnableAPMode(ctx context.Context, ssid, psk string) (<-chan provision.Update, error) {
+func (b *Provisioner) EnableAPMode(ctx context.Context, ssid, psk string) (<-chan provision.Update, error) {
 	if err := provision.ValidateCredentials(ssid, psk); err != nil {
 		return nil, err
 	}
@@ -100,7 +100,7 @@ func (b *NetworkManagerProvisioner) EnableAPMode(ctx context.Context, ssid, psk 
 	return b.pollProvisionUpdates(ctx, 100*time.Millisecond), nil
 }
 
-func (b *NetworkManagerProvisioner) DisableAPMode() error {
+func (b *Provisioner) DisableAPMode() error {
 	if b.activeConn == "" {
 		return errors.New("no active AP connection")
 	}
@@ -116,7 +116,7 @@ func (b *NetworkManagerProvisioner) DisableAPMode() error {
 	return nil
 }
 
-func (b *NetworkManagerProvisioner) ConnectToNetwork(ctx context.Context, ssid, psk string) (<-chan provision.Update, error) {
+func (b *Provisioner) ConnectToNetwork(ctx context.Context, ssid, psk string) (<-chan provision.Update, error) {
 	if err := provision.ValidateCredentials(ssid, psk); err != nil {
 		return nil, err
 	}
@@ -148,11 +148,11 @@ func (b *NetworkManagerProvisioner) ConnectToNetwork(ctx context.Context, ssid, 
 	return b.pollProvisionUpdates(ctx, 100*time.Millisecond), nil
 }
 
-func (b *NetworkManagerProvisioner) Close() error {
+func (b *Provisioner) Close() error {
 	return b.conn.Close()
 }
 
-func (b *NetworkManagerProvisioner) pollProvisionUpdates(ctx context.Context, tick time.Duration) <-chan provision.Update {
+func (b *Provisioner) pollProvisionUpdates(ctx context.Context, tick time.Duration) <-chan provision.Update {
 	ch := make(chan provision.Update)
 	go func() {
 		t := time.NewTicker(tick)
@@ -195,7 +195,7 @@ func toProvisionUpdate(s deviceState) provision.Update {
 
 const dbusErrNotAllowed = "org.freedesktop.NetworkManager.Device.NotAllowed"
 
-func (b *NetworkManagerProvisioner) Scan(ctx context.Context) ([]provision.Network, error) {
+func (b *Provisioner) Scan(ctx context.Context) ([]provision.Network, error) {
 	t, err := b.lastScanTime(ctx)
 	if err != nil {
 		return nil, err
@@ -216,7 +216,7 @@ func (b *NetworkManagerProvisioner) Scan(ctx context.Context) ([]provision.Netwo
 
 const nmAccessPointIface = "org.freedesktop.NetworkManager.AccessPoint"
 
-func (b *NetworkManagerProvisioner) getNetworkList(ctx context.Context) ([]provision.Network, error) {
+func (b *Provisioner) getNetworkList(ctx context.Context) ([]provision.Network, error) {
 	accessPointsVariant, err := b.conn.Object(nmBusName, b.ifacePath).GetProperty("org.freedesktop.NetworkManager.Device.Wireless.AccessPoints")
 	if err != nil {
 		return nil, fmt.Errorf("getting access points: %w", err)
@@ -266,7 +266,7 @@ func (b *NetworkManagerProvisioner) getNetworkList(ctx context.Context) ([]provi
 }
 
 // calculates the security that an access point has (wpa, wpa2, etc)
-func (b *NetworkManagerProvisioner) accessPointSecurity(apPath dbus.ObjectPath) (provision.NetworkSecurity, error) {
+func (b *Provisioner) accessPointSecurity(apPath dbus.ObjectPath) (provision.NetworkSecurity, error) {
 	flagsVariant, err := b.conn.Object(nmBusName, apPath).GetProperty("org.freedesktop.NetworkManager.AccessPoint.Flags")
 	if err != nil {
 		return provision.NetworkSecurityNone, fmt.Errorf("getting security flags: %w", err)
@@ -302,7 +302,7 @@ func (b *NetworkManagerProvisioner) accessPointSecurity(apPath dbus.ObjectPath) 
 
 // requestScan requests a re-scan of the AP list, returning a bool that indicates whether the caller should
 // await the list updating, alongside an error.
-func (b *NetworkManagerProvisioner) requestScan(ctx context.Context) (bool, error) {
+func (b *Provisioner) requestScan(ctx context.Context) (bool, error) {
 	call := b.conn.Object(nmBusName, b.ifacePath).CallWithContext(
 		ctx,
 		"org.freedesktop.NetworkManager.Device.Wireless.RequestScan",
@@ -323,7 +323,7 @@ func (b *NetworkManagerProvisioner) requestScan(ctx context.Context) (bool, erro
 	return true, nil
 }
 
-func (b *NetworkManagerProvisioner) lastScanTime(ctx context.Context) (int64, error) {
+func (b *Provisioner) lastScanTime(ctx context.Context) (int64, error) {
 	var lastScanTime int64
 	lastScanVariant, err := b.conn.Object(nmBusName, b.ifacePath).GetProperty("org.freedesktop.NetworkManager.Device.Wireless.LastScan")
 	if err != nil {
@@ -337,7 +337,7 @@ func (b *NetworkManagerProvisioner) lastScanTime(ctx context.Context) (int64, er
 	return lastScanTime, nil
 }
 
-func (b *NetworkManagerProvisioner) awaitLastScanTimeUpdate(ctx context.Context, startTime int64) error {
+func (b *Provisioner) awaitLastScanTimeUpdate(ctx context.Context, startTime int64) error {
 	t := time.NewTicker(100 * time.Millisecond)
 	defer t.Stop()
 

@@ -73,7 +73,7 @@ func TestMain(m *testing.M) {
 // test transparently reconnect the shared system bus) at test end.
 func newFlowServer(t *testing.T, iface string) (*httptest.Server, *iotflow.Flow) {
 	t.Helper()
-	nmProvisioner, err := networkmanager.NewNetworkManagerProvisioner(iface)
+	nmProvisioner, err := networkmanager.NewProvisioner(iface)
 	if err != nil {
 		t.Fatalf("NewNetworkManagerProvisioner(%q): %v", iface, err)
 	}
@@ -167,8 +167,10 @@ func waitForState(t *testing.T, events <-chan sseEvent, want iotflow.FlowState, 
 	}
 }
 
-// postCredentials POSTs a credential submission and asserts the response status.
-func postCredentials(t *testing.T, base, ssid, psk string, wantStatus int) {
+// postCredentials POSTs a credential submission, asserts the response status,
+// and returns the decoded error body. On a 202 there is no body, so the zero
+// value comes back; callers that only care about the status ignore the result.
+func postCredentials(t *testing.T, base, ssid, psk string, wantStatus int) errorResponse {
 	t.Helper()
 	body, err := json.Marshal(credentialsRequest{SSID: ssid, PSK: psk})
 	if err != nil {
@@ -182,6 +184,15 @@ func postCredentials(t *testing.T, base, ssid, psk string, wantStatus int) {
 	if resp.StatusCode != wantStatus {
 		t.Fatalf("POST /credentials(%q) = %d, want %d", ssid, resp.StatusCode, wantStatus)
 	}
+	if resp.StatusCode == http.StatusAccepted {
+		return errorResponse{}
+	}
+
+	var errRes errorResponse
+	if err := json.NewDecoder(resp.Body).Decode(&errRes); err != nil {
+		t.Fatalf("decoding error body of POST /credentials(%q): %v", ssid, err)
+	}
+	return errRes
 }
 
 // TestProvisioningRetryThenSuccess drives the full provisioning lifecycle over
@@ -290,30 +301,76 @@ func TestListAccessPointsOverHTTP(t *testing.T) {
 }
 
 // TestCredentialSubmissionStatusCodes exercises the POST /credentials status
-// mapping through the real Flow.Submit. The Flow is never Begun, so nothing
-// consumes the single-slot credentials channel — making the pending (409) path
-// deterministic.
+// and error-code mapping through the real Flow.Submit, which — unlike the
+// injected-error table in TestCredentialStateStatusCode — pins that the live
+// state machine actually produces those errors at the moments claimed.
+//
+// The Flow's state is what decides the outcome: Submit checks it before
+// validating, so the test runs in two phases, before and after Begin has
+// parked the Flow in StateWaitingForCredentials.
+//
+// ErrSubmissionPending is deliberately not covered here. It isn't reachable
+// deterministically against a live Flow — while waiting, the state machine is
+// blocked receiving on the single-slot credentials channel, so a submission is
+// consumed the instant it lands and the slot frees again.
 func TestCredentialSubmissionStatusCodes(t *testing.T) {
 	fake.Reset()
 	fake.AddWiFiDevice("wlan0")
-	srv, _ := newFlowServer(t, "wlan0")
+	fake.SetActivateOutcome(nmfake.ConnectScript()...)
+	srv, flow := newFlowServer(t, "wlan0")
 
-	// Validation failures are rejected before ever reaching the state machine.
-	postCredentials(t, srv.URL, "home-net", "short", http.StatusBadRequest) // PSK < 8 chars
-	postCredentials(t, srv.URL, "", "good-password", http.StatusBadRequest) // empty SSID
-
-	// First well-formed submission is buffered and accepted.
-	postCredentials(t, srv.URL, "home-net", "good-password", http.StatusAccepted)
-	// A second one, with the first still pending (unconsumed), conflicts.
-	postCredentials(t, srv.URL, "home-net", "good-password", http.StatusConflict)
-
-	// A body that isn't valid JSON is a bad request.
+	// Phase 1: Begin has not run, so the Flow is StateIdle. The state check
+	// short-circuits ahead of validation, so even well-formed credentials are
+	// refused — and refused as a conflict (retryable once the AP is up), not as
+	// a client error.
+	errRes := postCredentials(t, srv.URL, "home-net", "good-password", http.StatusConflict)
+	if errRes.Code != "ErrNotAwaitingCredentials" {
+		t.Errorf("idle flow: code = %q, want ErrNotAwaitingCredentials", errRes.Code)
+	}
+	// Malformed JSON never reaches the Flow, so it is a 400 regardless of state.
 	resp, err := http.Post(srv.URL+"/credentials", "application/json", strings.NewReader("{not json"))
 	if err != nil {
 		t.Fatalf("POST /credentials (malformed): %v", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("POST /credentials (malformed) = %d, want 400", resp.StatusCode)
+	}
+
+	// Phase 2: drive the Flow to StateWaitingForCredentials, where validation is
+	// finally reached.
+	events, closeStream := openEventStream(t, srv.URL)
+	defer closeStream()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	beginErr := make(chan error, 1)
+	go func() { beginErr <- flow.Begin(ctx) }()
+
+	waitForState(t, events, iotflow.StateWaitingForCredentials, 5*time.Second)
+
+	// Both validation sentinels surface as one client-facing code. Each leaves
+	// the Flow waiting, so the next case can run against the same state.
+	errRes = postCredentials(t, srv.URL, "home-net", "short", http.StatusBadRequest) // PSK < 8 chars
+	if errRes.Code != "ErrInvalidCredentials" {
+		t.Errorf("short psk: code = %q, want ErrInvalidCredentials", errRes.Code)
+	}
+	errRes = postCredentials(t, srv.URL, "", "good-password", http.StatusBadRequest) // empty SSID
+	if errRes.Code != "ErrInvalidCredentials" {
+		t.Errorf("empty ssid: code = %q, want ErrInvalidCredentials", errRes.Code)
+	}
+
+	// A well-formed submission is accepted and consumed — asserted by the Flow
+	// running to completion, which it can only do on credentials it received.
+	postCredentials(t, srv.URL, "home-net", "good-password", http.StatusAccepted)
+	waitForState(t, events, iotflow.StateProvisioned, 5*time.Second)
+
+	select {
+	case err := <-beginErr:
+		if err != nil {
+			t.Fatalf("Begin returned %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Begin did not return after provisioning completed")
 	}
 }

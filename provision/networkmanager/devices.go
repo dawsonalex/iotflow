@@ -71,12 +71,12 @@ func getDeviceState(conn *dbus.Conn, devicePath dbus.ObjectPath) (deviceState, e
 	return deviceState(v), nil
 }
 
-// connectionSettings is the variant map that gets passed to NetworkManagerProvisioner.addAndActivateConnection
+// connectionSettings is the variant map that gets passed to Provisioner.addAndActivateConnection
 // for information on the shape of the map, check man pages nm-settings-dbus(5).
 // TODO: This could become a struct that contains specific values, which could be serialised to the variant map.
 type connectionSettings map[string]map[string]dbus.Variant
 
-func (b *NetworkManagerProvisioner) addAndActivateConnection(settings connectionSettings) (dbus.ObjectPath, error) {
+func (b *Provisioner) addAndActivateConnection(settings connectionSettings) (dbus.ObjectPath, error) {
 	var activeConn, connPath dbus.ObjectPath
 
 	call := b.conn.Object(nmBusName, nmObjectPath).Call(

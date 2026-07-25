@@ -60,9 +60,9 @@ func TestMain(m *testing.M) {
 // newProvisioner builds a provisioner against the shared fake and closes it at
 // test end. Closing disconnects the cached system-bus connection; the next
 // construction transparently reconnects (godbus re-reads the env address).
-func newProvisioner(t *testing.T, iface string) *networkmanager.NetworkManagerProvisioner {
+func newProvisioner(t *testing.T, iface string) *networkmanager.Provisioner {
 	t.Helper()
-	p, err := networkmanager.NewNetworkManagerProvisioner(iface)
+	p, err := networkmanager.NewProvisioner(iface)
 	if err != nil {
 		t.Fatalf("NewNetworkManagerProvisioner(%q): %v", iface, err)
 	}
@@ -127,13 +127,13 @@ func TestDeviceDiscovery(t *testing.T) {
 	})
 
 	t.Run("explicit non-wifi interface is rejected", func(t *testing.T) {
-		if _, err := networkmanager.NewNetworkManagerProvisioner("eth0"); err == nil {
+		if _, err := networkmanager.NewProvisioner("eth0"); err == nil {
 			t.Fatal("expected an error for a non-WiFi interface, got nil")
 		}
 	})
 
 	t.Run("unknown interface is rejected", func(t *testing.T) {
-		if _, err := networkmanager.NewNetworkManagerProvisioner("nope0"); err == nil {
+		if _, err := networkmanager.NewProvisioner("nope0"); err == nil {
 			t.Fatal("expected an error for an unknown interface, got nil")
 		}
 	})

@@ -37,6 +37,11 @@ type handler struct {
 	keepalive   time.Duration // SSE heartbeat interval; see defaultKeepalive
 }
 
+type errorResponse struct {
+	Code  string `json:"code"`
+	Error string `json:"error"`
+}
+
 type credentialsRequest struct {
 	SSID string `json:"ssid"`
 	PSK  string `json:"psk"`
@@ -53,17 +58,37 @@ func (h *handler) handlePostCredentials() http.HandlerFunc {
 		}
 
 		err := h.flow.Submit(reqBody.SSID, reqBody.PSK)
-		switch {
-		case err == nil:
-			rw.WriteHeader(http.StatusAccepted) // 202 — acked while AP is still up
-		case errors.Is(err, iotflow.ErrSubmissionPending):
-			http.Error(rw, err.Error(), http.StatusConflict) // 409
-		case errors.Is(err, provision.ErrSSIDInvalid), errors.Is(err, provision.ErrPSKInvalid):
-			http.Error(rw, err.Error(), http.StatusBadRequest) // 400
-		default:
-			http.Error(rw, err.Error(), http.StatusInternalServerError)
+		if err != nil {
+			errRes := errorResponse{Code: "credentials_error", Error: err.Error()}
+			statusCode := http.StatusInternalServerError
+
+			switch {
+			case errors.Is(err, iotflow.ErrNotAwaitingCredentials):
+				errRes.Code = "ErrNotAwaitingCredentials"
+				statusCode = http.StatusConflict
+			case errors.Is(err, iotflow.ErrSubmissionPending):
+				errRes.Code = "ErrSubmissionPending"
+				statusCode = http.StatusConflict
+			case errors.Is(err, provision.ErrSSIDInvalid), errors.Is(err, provision.ErrPSKInvalid):
+				errRes.Code = "ErrInvalidCredentials"
+				statusCode = http.StatusBadRequest
+			}
+
+			// Header and status must both be written before the body: the first
+			// write to rw implicitly commits 200, which would discard statusCode.
+			rw.Header().Set("Content-Type", "application/json")
+			rw.WriteHeader(statusCode)
+			if encErr := json.NewEncoder(rw).Encode(errRes); encErr != nil {
+				// The status line is already on the wire, so this can only be
+				// reported, not turned into a 500 response.
+				h.handleErr(r, fmt.Errorf("encoding error response: %w", encErr))
+			}
+
 			h.handleErr(r, err)
+			return
 		}
+
+		rw.WriteHeader(http.StatusAccepted)
 	}
 }
 

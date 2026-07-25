@@ -32,7 +32,7 @@ commit-check: fmt vet lint test ## Run all checks before committing
 
 test: ## Run tests
 	@echo "Running tests..."
-	@go test -v -race ./...
+	go test -v -race ./...
 
 test-integration: ## Run integration tests against the fake NetworkManager (needs dbus-daemon)
 	@echo "Running integration tests..."

@@ -78,9 +78,15 @@ type credentials struct {
 	psk  string
 }
 
-// ErrSubmissionPending is returned by Submit when a previous submission has not
-// yet been consumed by the state machine.
-var ErrSubmissionPending = errors.New("a credential submission is already pending")
+var (
+	// ErrSubmissionPending is returned by Submit when a previous submission has not
+	// yet been consumed by the state machine.
+	ErrSubmissionPending = errors.New("a credential submission is already pending")
+
+	// ErrNotAwaitingCredentials is returned by Submit when the Flow is not in a state to
+	// accept new credentials.
+	ErrNotAwaitingCredentials = errors.New("not in StateWaitingForCredentials")
+)
 
 // Flow orchestrates the full WiFi provisioning lifecycle: checking connection
 // status, enabling AP mode, receiving station credentials, disabling AP mode,
@@ -132,7 +138,22 @@ func NewFlow(apSsid, apPsk string, p provision.Provisioner, opts ...FlowOpt) (*F
 // non-blocking and safe for concurrent use. Credentials are validated before
 // being accepted; an invalid SSID or PSK returns ErrSSIDInvalid/ErrPSKInvalid.
 // If a previous submission is still pending, Submit returns ErrSubmissionPending.
+//
+// If the Flow is not in a state to accept new credentials, Submit returns ErrNotAwaitingCredentials
+// and the credentials are discarded.
 func (f *Flow) Submit(ssid, psk string) error {
+	// lastStateUpdate is written by emit under mu, so the read must be guarded.
+	// The lock is released before the send: the state can only be a snapshot
+	// anyway (the machine may move on the instant it is read), and holding mu
+	// across the channel send would deadlock against emit.
+	f.mu.Lock()
+	state := f.lastStateUpdate.State
+	f.mu.Unlock()
+
+	if state != StateWaitingForCredentials {
+		return ErrNotAwaitingCredentials
+	}
+
 	if err := provision.ValidateCredentials(ssid, psk); err != nil {
 		return err
 	}

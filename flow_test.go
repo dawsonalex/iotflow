@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/dawsonalex/iotflow"
 	"github.com/dawsonalex/iotflow/internal/iotflowtest"
@@ -35,6 +36,28 @@ func watchUpdates(t *testing.T, ch <-chan iotflow.FlowUpdate, target iotflow.Flo
 		resultCh <- all
 	}()
 	return resultCh, signalCh
+}
+
+// waitTimeout bounds every blocking receive in this file. The Flow's mocks are
+// all in-memory, so any wait longer than this means the state machine is stuck,
+// not slow.
+const waitTimeout = 5 * time.Second
+
+// waitFor receives one value from ch, failing the test rather than blocking
+// forever if it doesn't arrive. Without this a mis-ordered Submit (one issued
+// before the Flow reaches StateWaitingForCredentials, which Submit now rejects)
+// parks the state machine and stalls the whole package until the go test
+// timeout, hiding the actual failure.
+func waitFor[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(waitTimeout):
+		t.Fatalf("timed out after %s waiting for %s", waitTimeout, what)
+		var zero T
+		return zero
+	}
 }
 
 // stateSeq extracts just the State field from each FlowUpdate.
@@ -70,7 +93,7 @@ func TestBegin_AlreadyConnected(t *testing.T) {
 		iotflow.StateIdle,
 		iotflow.StateCheckingConnection,
 		iotflow.StateConnected,
-	}, stateSeq(<-results))
+	}, stateSeq(waitFor(t, results, "the update stream to close")))
 }
 
 func TestBegin_FullProvisioning(t *testing.T) {
@@ -91,10 +114,10 @@ func TestBegin_FullProvisioning(t *testing.T) {
 	beginErr := make(chan error, 1)
 	go func() { beginErr <- f.Begin(t.Context()) }()
 
-	<-waiting
+	waitFor(t, waiting, "StateWaitingForCredentials")
 	assert.NoError(t, f.Submit(testNetSSID, testNetPSK))
 
-	assert.NoError(t, <-beginErr)
+	assert.NoError(t, waitFor(t, beginErr, "Begin to return"))
 	assert.Equal(t, []iotflow.FlowState{
 		iotflow.StateIdle,
 		iotflow.StateCheckingConnection,
@@ -103,7 +126,7 @@ func TestBegin_FullProvisioning(t *testing.T) {
 		iotflow.StateDisablingAP,
 		iotflow.StateConnecting,
 		iotflow.StateProvisioned,
-	}, stateSeq(<-results))
+	}, stateSeq(waitFor(t, results, "the update stream to close")))
 }
 
 // --- Begin: retry path ---
@@ -134,14 +157,14 @@ func TestBegin_RetryOnConnectionFailure(t *testing.T) {
 	go func() { beginErr <- f.Begin(t.Context()) }()
 
 	// First wait — submit credentials that will fail at the network level.
-	<-waiting
+	waitFor(t, waiting, "StateWaitingForCredentials")
 	assert.NoError(t, f.Submit(testNetSSID, "wrongpass1"))
 
 	// Flow loops back through StateEnablingAP to StateWaitingForCredentials.
-	<-waiting
+	waitFor(t, waiting, "StateWaitingForCredentials")
 	assert.NoError(t, f.Submit(testNetSSID, testNetPSK))
 
-	assert.NoError(t, <-beginErr)
+	assert.NoError(t, waitFor(t, beginErr, "Begin to return"))
 	assert.Equal(t, []iotflow.FlowState{
 		iotflow.StateIdle,
 		iotflow.StateCheckingConnection,
@@ -154,7 +177,7 @@ func TestBegin_RetryOnConnectionFailure(t *testing.T) {
 		iotflow.StateDisablingAP,
 		iotflow.StateConnecting,
 		iotflow.StateProvisioned,
-	}, stateSeq(<-results))
+	}, stateSeq(waitFor(t, results, "the update stream to close")))
 }
 
 // --- Begin: error paths ---
@@ -173,7 +196,7 @@ func TestBegin_IsConnectedError(t *testing.T) {
 	err := f.Begin(t.Context())
 	assert.ErrorIs(t, err, backendErr)
 
-	updates := <-results
+	updates := waitFor(t, results, "the update stream to close")
 	assert.Equal(t, []iotflow.FlowState{iotflow.StateIdle, iotflow.StateCheckingConnection, iotflow.StateFailed}, stateSeq(updates))
 	assert.ErrorIs(t, updates[len(updates)-1].Err, backendErr)
 }
@@ -193,7 +216,7 @@ func TestBegin_EnableAPModeError(t *testing.T) {
 	err := f.Begin(t.Context())
 	assert.ErrorIs(t, err, backendErr)
 
-	updates := <-results
+	updates := waitFor(t, results, "the update stream to close")
 	assert.Equal(t, []iotflow.FlowState{iotflow.StateIdle, iotflow.StateCheckingConnection, iotflow.StateEnablingAP, iotflow.StateFailed}, stateSeq(updates))
 }
 
@@ -215,13 +238,13 @@ func TestBegin_DisableAPModeError(t *testing.T) {
 	beginErr := make(chan error, 1)
 	go func() { beginErr <- f.Begin(t.Context()) }()
 
-	<-waiting
+	waitFor(t, waiting, "StateWaitingForCredentials")
 	assert.NoError(t, f.Submit(testNetSSID, testNetPSK))
 
-	err := <-beginErr
+	err := waitFor(t, beginErr, "Begin to return")
 	assert.ErrorIs(t, err, backendErr)
 
-	updates := <-results
+	updates := waitFor(t, results, "the update stream to close")
 	assert.Equal(t, []iotflow.FlowState{
 		iotflow.StateIdle,
 		iotflow.StateCheckingConnection,
@@ -250,13 +273,13 @@ func TestBegin_ContextCancelledWhileWaiting(t *testing.T) {
 	beginErr := make(chan error, 1)
 	go func() { beginErr <- f.Begin(ctx) }()
 
-	<-waiting
+	waitFor(t, waiting, "StateWaitingForCredentials")
 	cancel()
 
-	err := <-beginErr
+	err := waitFor(t, beginErr, "Begin to return")
 	assert.ErrorIs(t, err, context.Canceled)
 
-	updates := <-results
+	updates := waitFor(t, results, "the update stream to close")
 	last := updates[len(updates)-1]
 	assert.Equal(t, iotflow.StateFailed, last.State)
 	assert.ErrorIs(t, last.Err, context.Canceled)
@@ -264,24 +287,106 @@ func TestBegin_ContextCancelledWhileWaiting(t *testing.T) {
 
 // --- Submit ---
 
-func TestSubmit_Success(t *testing.T) {
-	f := newTestFlow(t, &iotflowtest.MockProvisioner{})
-	assert.NoError(t, f.Submit(testNetSSID, testNetPSK))
+// beginWaitingFlow returns a Flow whose Begin is already running and parked in
+// StateWaitingForCredentials — the only state in which Submit accepts anything,
+// since the state check precedes validation. Begin is cancelled and drained at
+// test end.
+func beginWaitingFlow(t *testing.T) *iotflow.Flow {
+	t.Helper()
+	f := newTestFlow(t, &iotflowtest.MockProvisioner{
+		IsConnectedFn: func(_ context.Context) (bool, error) { return false, nil },
+		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan provision.Update, error) {
+			return iotflowtest.ConnectedCh(), nil
+		},
+		// Stubbed because an accepted submission lets the machine run on to the
+		// connect step; a nil field would panic there.
+		ConnectToNetworkFn: func(_ context.Context, _, _ string) (<-chan provision.Update, error) {
+			return iotflowtest.ConnectedCh(), nil
+		},
+	})
+
+	ch, unsub := f.Subscribe()
+	t.Cleanup(unsub)
+	_, waiting := watchUpdates(t, ch, iotflow.StateWaitingForCredentials)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	beginErr := make(chan error, 1)
+	go func() { beginErr <- f.Begin(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		waitFor(t, beginErr, "Begin to return after cancellation")
+	})
+
+	waitFor(t, waiting, "StateWaitingForCredentials")
+	return f
 }
 
-func TestSubmit_InvalidCredentials(t *testing.T) {
-	f := newTestFlow(t, &iotflowtest.MockProvisioner{})
-	assert.ErrorIs(t, f.Submit(testNetSSID, "short"), provision.ErrPSKInvalid)
+// TestSubmit covers Submit's rejection ladder. Order matters and is asserted
+// here: the state check runs first, so a Flow that isn't waiting rejects even
+// well-formed credentials, and validation only ever runs on a waiting Flow.
+func TestSubmit(t *testing.T) {
+	cases := []struct {
+		name    string
+		waiting bool // drive Begin to StateWaitingForCredentials first
+		ssid    string
+		psk     string
+		wantErr error
+	}{
+		{
+			name:    "accepted while waiting",
+			waiting: true,
+			ssid:    testNetSSID,
+			psk:     testNetPSK,
+		},
+		{
+			// The state check short-circuits before ValidateCredentials, so an
+			// idle Flow reports the state, not the (valid) credentials.
+			name:    "rejected when not waiting",
+			ssid:    testNetSSID,
+			psk:     testNetPSK,
+			wantErr: iotflow.ErrNotAwaitingCredentials,
+		},
+		{
+			name:    "psk too short",
+			waiting: true,
+			ssid:    testNetSSID,
+			psk:     "short",
+			wantErr: provision.ErrPSKInvalid,
+		},
+		{
+			name:    "empty ssid",
+			waiting: true,
+			ssid:    "",
+			psk:     testNetPSK,
+			wantErr: provision.ErrSSIDInvalid,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newTestFlow(t, &iotflowtest.MockProvisioner{})
+			if tc.waiting {
+				f = beginWaitingFlow(t)
+			}
+
+			err := f.Submit(tc.ssid, tc.psk)
+			if tc.wantErr == nil {
+				assert.NoError(t, err)
+				return
+			}
+			assert.ErrorIs(t, err, tc.wantErr)
+		})
+	}
 }
 
-func TestSubmit_AlreadyPending(t *testing.T) {
-	f := newTestFlow(t, &iotflowtest.MockProvisioner{})
-
-	assert.NoError(t, f.Submit(testNetSSID, testNetPSK))
-
-	// credsCh buffer (capacity 1) is now full — second submission must be rejected.
-	assert.ErrorIs(t, f.Submit(testNetSSID, testNetPSK), iotflow.ErrSubmissionPending)
-}
+// NOTE: the old TestSubmit_AlreadyPending was removed rather than repaired.
+// ErrSubmissionPending is no longer deterministically reachable: in
+// StateWaitingForCredentials the state machine is parked on a receive from
+// credsCh, so a submission is consumed as soon as it lands and the buffer frees
+// up again; in every other state the state check rejects first with
+// ErrNotAwaitingCredentials. The error is kept because the window is real for
+// concurrent submitters, and the transport's mapping of it stays covered by
+// TestCredentialStateStatusCode in transport/http.
 
 // --- Subscribe lifecycle ---
 
@@ -381,13 +486,13 @@ func TestBegin_RetryOnConnectError(t *testing.T) {
 	beginErr := make(chan error, 1)
 	go func() { beginErr <- f.Begin(t.Context()) }()
 
-	<-waiting
+	waitFor(t, waiting, "StateWaitingForCredentials")
 	assert.NoError(t, f.Submit(testNetSSID, "wrongpass1"))
 
-	<-waiting
+	waitFor(t, waiting, "StateWaitingForCredentials")
 	assert.NoError(t, f.Submit(testNetSSID, testNetPSK))
 
-	assert.NoError(t, <-beginErr)
+	assert.NoError(t, waitFor(t, beginErr, "Begin to return"))
 	assert.Equal(t, []iotflow.FlowState{
 		iotflow.StateIdle,
 		iotflow.StateCheckingConnection,
@@ -400,7 +505,7 @@ func TestBegin_RetryOnConnectError(t *testing.T) {
 		iotflow.StateDisablingAP,
 		iotflow.StateConnecting,
 		iotflow.StateProvisioned,
-	}, stateSeq(<-results))
+	}, stateSeq(waitFor(t, results, "the update stream to close")))
 }
 
 // TestBegin_ContextCancelledDuringConnect covers cancellation on the synchronous
@@ -428,13 +533,13 @@ func TestBegin_ContextCancelledDuringConnect(t *testing.T) {
 	beginErr := make(chan error, 1)
 	go func() { beginErr <- f.Begin(ctx) }()
 
-	<-waiting
+	waitFor(t, waiting, "StateWaitingForCredentials")
 	assert.NoError(t, f.Submit(testNetSSID, testNetPSK))
 
-	err := <-beginErr
+	err := waitFor(t, beginErr, "Begin to return")
 	assert.ErrorIs(t, err, context.Canceled)
 
-	updates := <-results
+	updates := waitFor(t, results, "the update stream to close")
 	last := updates[len(updates)-1]
 	assert.Equal(t, iotflow.StateFailed, last.State)
 	assert.ErrorIs(t, last.Err, context.Canceled)
@@ -460,20 +565,29 @@ func TestBegin_ContextCancelledDuringConnectChannel(t *testing.T) {
 	ch, unsub := f.Subscribe()
 	defer unsub()
 
-	results, waiting := watchUpdates(t, ch, iotflow.StateConnecting)
+	results, connecting := watchUpdates(t, ch, iotflow.StateConnecting)
+
+	// A second subscription tracks the earlier state: Submit is rejected unless
+	// the Flow has reached StateWaitingForCredentials, and a rejected submission
+	// leaves the machine parked there forever — so the connect path under test
+	// is never entered.
+	credsCh, unsubCreds := f.Subscribe()
+	defer unsubCreds()
+	_, waitingForCreds := watchUpdates(t, credsCh, iotflow.StateWaitingForCredentials)
 
 	beginErr := make(chan error, 1)
 	go func() { beginErr <- f.Begin(ctx) }()
 
+	waitFor(t, waitingForCreds, "StateWaitingForCredentials")
 	assert.NoError(t, f.Submit(testNetSSID, testNetPSK))
 
-	<-waiting // Flow is now blocked draining the connect channel
+	waitFor(t, connecting, "StateConnecting") // Flow is now blocked draining the connect channel
 	cancel()
 
-	err := <-beginErr
+	err := waitFor(t, beginErr, "Begin to return")
 	assert.ErrorIs(t, err, context.Canceled)
 
-	updates := <-results
+	updates := waitFor(t, results, "the update stream to close")
 	last := updates[len(updates)-1]
 	assert.Equal(t, iotflow.StateFailed, last.State)
 	assert.ErrorIs(t, last.Err, context.Canceled)
@@ -513,15 +627,15 @@ func TestBegin_DropsStaleCredentialsOnRetry(t *testing.T) {
 	beginErr := make(chan error, 1)
 	go func() { beginErr <- f.Begin(t.Context()) }()
 
-	<-waiting
+	waitFor(t, waiting, "StateWaitingForCredentials")
 	assert.NoError(t, f.Submit(testNetSSID, testNetPSK))
 
 	// Second wait: by now the retry has run drainCreds, so the stale submission
 	// is gone and the Flow is blocked waiting for a fresh credential.
-	<-waiting
+	waitFor(t, waiting, "StateWaitingForCredentials")
 	assert.NoError(t, f.Submit("fresh-net", "freshpassword"))
 
-	assert.NoError(t, <-beginErr)
+	assert.NoError(t, waitFor(t, beginErr, "Begin to return"))
 	assert.Equal(t, "fresh-net", secondConnectSSID,
 		"retry must use the freshly submitted credential, not the stale mid-connect one")
 }
