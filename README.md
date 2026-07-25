@@ -196,7 +196,7 @@ NewNetworkManagerProvisioner(iface string) (*NetworkManagerProvisioner, error)
 type Provisioner interface {
     IsConnected(ctx context.Context) (bool, error)
     EnableAPMode(ctx context.Context, ssid, psk string) (<-chan ProvisionUpdate, error)
-    DisableAPMode() error
+    DisableAPMode(ctx context.Context) error
     ConnectToNetwork(ctx context.Context, ssid, psk string) (<-chan ProvisionUpdate, error)
     Close() error
 }
