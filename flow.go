@@ -84,9 +84,9 @@ var (
 	// accept new credentials.
 	ErrNotAwaitingCredentials = errors.New("not in StateWaitingForCredentials")
 
-	// ErrUpdateChanClosedPreemptively is returned when a flow state channel was closed, but the flow did not reach
+	// ErrUpdateChanClosedPrematurely is returned when a flow state channel was closed, but the flow did not reach
 	// a terminal state.
-	ErrUpdateChanClosedPreemptively = errors.New("update channel closed before reaching a terminal state")
+	ErrUpdateChanClosedPrematurely = errors.New("update channel closed before reaching a terminal state")
 )
 
 // Flow orchestrates the full WiFi provisioning lifecycle: checking connection
@@ -354,7 +354,7 @@ func (f *Flow) drainCreds() {
 // drainUntilDone reads from ch until a terminal ProvisionState is reached or
 // ctx is cancelled. Returns nil on ProvisionStateConnected, an error otherwise.
 // If ch closes without a terminal state (because the poller saw ctx.Done),
-// returns ctx.Err() is the context is cancelled, or ErrUpdateChanClosedPreemptively
+// returns ctx.Err() is the context is cancelled, or ErrUpdateChanClosedPrematurely
 // if the update channel is closed before a terminal state is reached.
 func drainUntilDone(ctx context.Context, ch <-chan provision.Update) error {
 	for {
@@ -366,7 +366,7 @@ func drainUntilDone(ctx context.Context, ch <-chan provision.Update) error {
 				if err := ctx.Err(); err != nil {
 					return err
 				}
-				return ErrUpdateChanClosedPreemptively
+				return ErrUpdateChanClosedPrematurely
 			}
 			if upd.State == provision.StateFailed {
 				return upd.Err
