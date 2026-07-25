@@ -89,7 +89,7 @@ three endpoints:
 
 - `POST /credentials` - accepts `{"ssid": "...", "psk": "..."}` and forwards it
   to `Flow.Submit`. Returns `202 Accepted` on success, `400` for invalid
-  credentials, `409` if a submission is already pending.
+  credentials, `409` if a submission is already pending or the flow is no longer awaiting credentials (indicated with a specific error).
 - `GET /events` - a Server-Sent Events stream of `FlowUpdate`s as they happen.
 - `GET /aps` - A list of the APs visisble to the device.
 
@@ -191,15 +191,15 @@ full flow — a subscriber that needs to tell those apart can look at whether
 ### Backend
 
 ```
-netowrkmanager.NewProvisioner(iface string) (*NetworkManagerProvisioner, error)
+networkmanager.NewProvisioner(iface string) (*networkmanager.Provisioner, error)
 
 type Provisioner interface {
     IsConnected(ctx context.Context) (bool, error)
-    EnableAPMode(ctx context.Context, ssid, psk string) (<-chan ProvisionUpdate, error)
+    EnableAPMode(ctx context.Context, ssid, psk string) (<-chan provision.Update, error)
     DisableAPMode(ctx context.Context) error
-    ConnectToNetwork(ctx context.Context, ssid, psk string) (<-chan ProvisionUpdate, error)
+    ConnectToNetwork(ctx context.Context, ssid, psk string) (<-chan provision.Update, error)
     Close() error
-	Scan(context.Context) ([]Network, error)
+    Scan(context.Context) ([]Network, error)
 }
 ```
 
@@ -243,6 +243,9 @@ WithErrorHandler(func(r *http.Request, err error)) HandlerOpt
 ErrSSIDInvalid       // SSID must be 1–32 characters
 ErrPSKInvalid        // PSK must be 8–63 characters
 ErrSubmissionPending // a previous Submit has not yet been consumed
+
+ErrNotAwaitingCredentials // The flow is not in a state to accept credentials. The submitted credentials will be discarded.
+ErrUpdateChanClosedPrematurely // The Flow state update channel has been closed before the Flow reaches a terminal state.
 ```
 
 **Credential constraints** (enforced by `Submit` and by the backend before any
