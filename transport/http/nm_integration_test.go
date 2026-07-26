@@ -92,8 +92,9 @@ func newFlowServer(t *testing.T, iface string) (*httptest.Server, *iotflow.Flow)
 
 // sseEvent mirrors the JSON that FlowUpdate.MarshalJSON emits onto the wire.
 type sseEvent struct {
-	State string `json:"state"`
-	Error string `json:"error"`
+	State  string `json:"state"`
+	Reason string `json:"reason"`
+	Error  string `json:"error"`
 }
 
 // openEventStream connects to GET {base}/events and streams decoded events. The

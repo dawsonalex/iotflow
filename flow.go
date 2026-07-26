@@ -22,6 +22,7 @@ const (
 	StateConnecting                             // ConnectToNetwork in progress
 	StateProvisioned                            // terminal: device is on a network, whether it was already connected at Begin or completed the flow
 	StateFailed                                 // terminal: unrecoverable error
+	StateAttemptFailed                          // non-terminal: an attempt failed recoverably (cause in Err/Reason) and the Flow re-enters AP mode. Emit-only — the machine never dispatches on it, the next update names the state it moved to.
 )
 
 func (s FlowState) String() string {
@@ -42,31 +43,100 @@ func (s FlowState) String() string {
 		return "Provisioned"
 	case StateFailed:
 		return "Failed"
+	case StateAttemptFailed:
+		return "AttemptFailed"
 	default:
 		return "Unknown"
 	}
 }
 
+// FailureReason classifies why an attempt failed, in terms a client can act on
+// without being handed the backend's error text. Err carries the detail for
+// logs and for Go consumers; Reason is what is safe to put on the wire.
+type FailureReason uint8
+
+const (
+	ReasonNone             FailureReason = iota // no failure
+	ReasonConnectFailed                         // ConnectToNetwork failed; the credentials or the target network are suspect
+	ReasonAPTeardownFailed                      // DisableAPMode failed; a device-side problem, resubmitting is still worth a try
+	ReasonInternal                              // anything else
+)
+
+func (r FailureReason) String() string {
+	switch r {
+	case ReasonNone:
+		return "none"
+	case ReasonConnectFailed:
+		return "connect_failed"
+	case ReasonAPTeardownFailed:
+		return "ap_teardown_failed"
+	case ReasonInternal:
+		return "internal"
+	default:
+		return "unknown"
+	}
+}
+
+// Message returns a client-facing description of the reason, safe to display to
+// whoever is holding the setup page. It deliberately says nothing about the
+// backend: transports use this in place of Err.Error() so that D-Bus object
+// paths, interface names and other internals do not reach an unauthenticated
+// client sitting on the provisioning AP.
+func (r FailureReason) Message() string {
+	switch r {
+	case ReasonNone:
+		return ""
+	case ReasonConnectFailed:
+		return "could not join the network — check the name and password and try again"
+	case ReasonAPTeardownFailed:
+		return "the device could not switch out of setup mode — please try again"
+	default:
+		return "the device hit an internal error"
+	}
+}
+
 // FlowUpdate carries a state transition and any associated error.
+//
+// Err is the raw backend error. It is useful to a Go consumer (errors.Is still
+// works) but it is not safe to hand to a client: see Reason and MarshalJSON.
 type FlowUpdate struct {
-	State FlowState
-	Err   error // non-nil only when State == StateFailed
+	State  FlowState
+	Err    error         // non-nil when State is StateFailed or StateAttemptFailed
+	Reason FailureReason // classification of Err; ReasonNone when Err is nil
 }
 
 // MarshalJSON renders a FlowUpdate for the wire. The bare struct is not directly
 // serializable: State would encode as an opaque integer and Err (an interface)
 // as null, so transports streaming updates (e.g. SSE) get a stable shape here.
+//
+// The encoding is deliberately redacted: it carries Reason and Reason.Message(),
+// never Err.Error(). Marshalling a FlowUpdate means putting it on a wire, and
+// the far end of that wire is an unauthenticated client on the provisioning AP —
+// handing it raw backend errors leaks D-Bus object paths, interface names and
+// other internals, and invites clients to string-match on them. Consumers that
+// need the underlying error read Err directly from the struct; errors.Is still
+// works there.
 func (u FlowUpdate) MarshalJSON() ([]byte, error) {
-	errStr := ""
+	msg := ""
+	reason := ""
 	if u.Err != nil {
-		errStr = u.Err.Error()
+		r := u.Reason
+		if r == ReasonNone {
+			// An error with no classification is still an error; say so
+			// generically rather than dropping it from the payload.
+			r = ReasonInternal
+		}
+		msg = r.Message()
+		reason = r.String()
 	}
 	return json.Marshal(struct {
-		State string `json:"state"`
-		Error string `json:"error,omitempty"`
+		State  string `json:"state"`
+		Reason string `json:"reason,omitempty"`
+		Error  string `json:"error,omitempty"`
 	}{
-		State: u.State.String(),
-		Error: errStr,
+		State:  u.State.String(),
+		Reason: reason,
+		Error:  msg,
 	})
 }
 
@@ -91,8 +161,11 @@ var (
 
 // Flow orchestrates the full WiFi provisioning lifecycle: checking connection
 // status, enabling AP mode, receiving station credentials, disabling AP mode,
-// and connecting to the target network. If ConnectToNetwork fails the Flow
-// re-enters AP mode so the user can submit new credentials.
+// and connecting to the target network. A DisableAPMode or ConnectToNetwork
+// failure is not terminal: the Flow emits StateAttemptFailed with the cause and
+// a FailureReason, then re-enters AP mode so the user can submit new
+// credentials. Each retry is gated on a fresh submission, so the loop cannot
+// spin.
 //
 // Flow is transport-agnostic. Credentials arrive via Submit and progress is
 // observed via Subscribe; a transport (such as the httphandler subpackage)
@@ -105,10 +178,19 @@ type Flow struct {
 
 	credsCh chan credentials // Submit → state machine
 
-	mu              sync.Mutex                   // guards subs, closed, lastStateUpdate
+	mu              sync.Mutex                   // guards subs, closed, lastStateUpdate, lastFailure
 	subs            map[chan FlowUpdate]struct{} // active update subscribers
 	closed          bool                         // true once Begin has returned
 	lastStateUpdate FlowUpdate                   // most recent emitted update; replayed to new subscribers.
+
+	// lastFailure is the most recent StateAttemptFailed update, retained until
+	// the Flow reaches StateProvisioned. StateAttemptFailed is emit-only, so it
+	// is overwritten in lastStateUpdate almost immediately and a subscriber that
+	// arrives afterwards would never learn why it is being asked for credentials
+	// again. That subscriber is the normal case, not an edge case: re-entering
+	// AP mode bounces the radio the client is connected over, so an SSE stream
+	// drops and reconnects on exactly this path.
+	lastFailure *FlowUpdate
 }
 
 type FlowOpt func(*Flow)
@@ -183,9 +265,15 @@ func (f *Flow) Subscribe() (<-chan FlowUpdate, func()) {
 
 	ch := make(chan FlowUpdate, 16)
 	// Replay the current state into the buffer. The channel is freshly created
-	// with spare capacity, so this send never blocks. Holding mu makes the
+	// with spare capacity, so these sends never block. Holding mu makes the
 	// replay-and-register atomic with emit: a subscriber can neither miss a
 	// transition nor receive the current state twice.
+	//
+	// An unresolved failure is replayed first, in the same order it was emitted
+	// live, so a client that connected after the recovery still learns why.
+	if f.lastFailure != nil {
+		ch <- *f.lastFailure
+	}
 	ch <- f.lastStateUpdate
 	if f.closed {
 		close(ch)
@@ -259,7 +347,12 @@ func (f *Flow) Begin(ctx context.Context) error {
 
 		case StateDisablingAP:
 			if err := f.provisioner.DisableAPMode(ctx); err != nil {
-				return f.fail(err)
+				// Not terminal: the AP is most likely still up, so going terminal
+				// here would strand the user on it with no way to resubmit.
+				// Re-entering AP mode reconverges whether the AP survived or was
+				// partially torn down.
+				state = f.retry(StateEnablingAP, err, ReasonAPTeardownFailed)
+				continue
 			}
 			state = StateConnecting
 			f.emit(FlowUpdate{State: state})
@@ -271,9 +364,7 @@ func (f *Flow) Begin(ctx context.Context) error {
 					return f.fail(ctx.Err())
 				}
 				// Retry: re-enable AP so the user can submit new credentials.
-				f.drainCreds()
-				state = StateEnablingAP
-				f.emit(FlowUpdate{State: state})
+				state = f.retry(StateEnablingAP, err, ReasonConnectFailed)
 				continue
 			}
 			if err := drainUntilDone(ctx, updates); err != nil {
@@ -281,9 +372,7 @@ func (f *Flow) Begin(ctx context.Context) error {
 					return f.fail(ctx.Err())
 				}
 				// Connection failed — loop back so the user can try again.
-				f.drainCreds()
-				state = StateEnablingAP
-				f.emit(FlowUpdate{State: state})
+				state = f.retry(StateEnablingAP, err, ReasonConnectFailed)
 				continue
 			}
 			f.emit(FlowUpdate{State: StateProvisioned})
@@ -316,6 +405,18 @@ func (f *Flow) emit(u FlowUpdate) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lastStateUpdate = u
+
+	switch u.State {
+	case StateAttemptFailed:
+		// Retain it for subscribers that arrive after the recovery.
+		upd := u
+		f.lastFailure = &upd
+	case StateProvisioned:
+		// The failure is resolved; a late subscriber should not be told the
+		// device had trouble when it is now on the network.
+		f.lastFailure = nil
+	}
+
 	for c := range f.subs {
 		select {
 		case c <- u:
@@ -325,8 +426,20 @@ func (f *Flow) emit(u FlowUpdate) {
 }
 
 func (f *Flow) fail(err error) error {
-	f.emit(FlowUpdate{State: StateFailed, Err: err})
+	f.emit(FlowUpdate{State: StateFailed, Err: err, Reason: ReasonInternal})
 	return err
+}
+
+// retry announces a recoverable failure and hands the machine to next. The
+// StateAttemptFailed update is what lets a client say *why* the setup page came
+// back; the update after it names the state actually entered, since
+// StateAttemptFailed is never occupied. Returns next so call sites read as a
+// single assignment.
+func (f *Flow) retry(next FlowState, err error, reason FailureReason) FlowState {
+	f.emit(FlowUpdate{State: StateAttemptFailed, Err: err, Reason: reason})
+	f.drainCreds()
+	f.emit(FlowUpdate{State: next})
+	return next
 }
 
 // closeSubs marks the Flow finished and closes every active subscription. After

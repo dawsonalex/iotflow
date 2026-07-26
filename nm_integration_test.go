@@ -185,6 +185,49 @@ func TestEnableAndDisableAPMode(t *testing.T) {
 	if got := fake.DeactivateCalls(); got != 1 {
 		t.Fatalf("DeactivateConnection called %d times, want 1", got)
 	}
+	// Deactivating leaves the profile in NetworkManager's configuration, where it
+	// survives reboots. A clean teardown deletes it too.
+	if got := fake.DeletedConns(); len(got) != 1 {
+		t.Fatalf("deleted %d connection profiles, want 1 (leaked: %v)", len(got), got)
+	}
+}
+
+// TestAPProfileNotLeakedOnRetry covers the path the Flow takes when DisableAPMode
+// fails: it loops back to EnableAPMode. Every EnableAPMode call adds a profile
+// with a fresh UUID, so unless the previous one is cleaned up the device
+// accumulates a dead AP profile per attempt, and every profile but the last
+// becomes unreachable — nothing retains its path.
+func TestAPProfileNotLeakedOnRetry(t *testing.T) {
+	fake.Reset()
+	fake.AddWiFiDevice("wlan0")
+	p := newProvisioner(t, "wlan0")
+	ctx := context.Background()
+
+	const attempts = 3
+	for i := range attempts {
+		ch, err := p.EnableAPMode(ctx, "my-iot-ap", "supersecret")
+		if err != nil {
+			t.Fatalf("attempt %d: EnableAPMode: %v", i, err)
+		}
+		if final := drain(t, ch); final.State != provision.StateConnected {
+			t.Fatalf("attempt %d: final AP state = %v (err %v), want Connected", i, final.State, final.Err)
+		}
+	}
+
+	// Each re-entry cleans up its predecessor, so only the newest profile is
+	// still around at this point.
+	if got := fake.DeletedConns(); len(got) != attempts-1 {
+		t.Fatalf("after %d EnableAPMode calls, deleted %d profiles, want %d (deleted: %v)",
+			attempts, len(got), attempts-1, got)
+	}
+
+	if err := p.DisableAPMode(ctx); err != nil {
+		t.Fatalf("DisableAPMode: %v", err)
+	}
+	if got := fake.DeletedConns(); len(got) != attempts {
+		t.Fatalf("after teardown, deleted %d profiles, want %d (leaked: %v)",
+			len(got), attempts, got)
+	}
 }
 
 func TestConnectToNetwork(t *testing.T) {
@@ -330,5 +373,83 @@ func waitForClose[T any](t *testing.T, ch <-chan T) []T {
 		case <-timeout:
 			t.Fatalf("timed out after %s waiting for channel to close", waitTimeout)
 		}
+	}
+}
+
+// TestEnableAPModeKeepsOldAPUntilReplacementIsUp pins the ordering inside
+// EnableAPMode. The AP the user is associated with is their only route back
+// into the device, and EnableAPMode failing is terminal for the Flow — so if
+// the old AP were torn down before the new one activated, a failed activation
+// would leave the device with no AP, no station connection and a finished Flow.
+// That needs physical access to undo.
+func TestEnableAPModeKeepsOldAPUntilReplacementIsUp(t *testing.T) {
+	fake.Reset()
+	fake.AddWiFiDevice("wlan0")
+	p := newProvisioner(t, "wlan0")
+	ctx := context.Background()
+
+	ch, err := p.EnableAPMode(ctx, "my-iot-ap", "supersecret")
+	if err != nil {
+		t.Fatalf("EnableAPMode: %v", err)
+	}
+	if final := drain(t, ch); final.State != provision.StateConnected {
+		t.Fatalf("final AP state = %v, want Connected", final.State)
+	}
+
+	live := fake.LiveConns()
+	if len(live) != 1 {
+		t.Fatalf("after one EnableAPMode, live profiles = %v, want exactly 1", live)
+	}
+	original := live[0]
+
+	// Re-enter AP mode the way the retry path does. The original profile must
+	// survive until the replacement exists — asserted by the fake, which errors
+	// on a Delete for a path it never issued or already removed, so a delete
+	// happening at the wrong time cannot pass silently.
+	ch, err = p.EnableAPMode(ctx, "my-iot-ap", "supersecret")
+	if err != nil {
+		t.Fatalf("second EnableAPMode: %v", err)
+	}
+	if final := drain(t, ch); final.State != provision.StateConnected {
+		t.Fatalf("second final AP state = %v, want Connected", final.State)
+	}
+
+	live = fake.LiveConns()
+	if len(live) != 1 {
+		t.Fatalf("after re-entry, live profiles = %v, want exactly 1", live)
+	}
+	if live[0] == original {
+		t.Fatal("re-entry reused the original profile; expected a fresh one")
+	}
+	if deleted := fake.DeletedConns(); len(deleted) != 1 || deleted[0] != original {
+		t.Fatalf("deleted = %v, want exactly the original profile %q", deleted, original)
+	}
+}
+
+// TestStationProfileNotLeakedOnRetry covers the connect-failure counterpart.
+// A profile from a previous ConnectToNetwork is by definition a failed attempt
+// — a successful one ends the Flow — and it carries the PSK the user got wrong
+// with autoconnect: true, so leaving it behind means NetworkManager keeps
+// retrying a known-bad credential for that SSID across reboots.
+func TestStationProfileNotLeakedOnRetry(t *testing.T) {
+	fake.Reset()
+	fake.AddWiFiDevice("wlan0")
+	p := newProvisioner(t, "wlan0")
+	ctx := context.Background()
+
+	const attempts = 3
+	for i := range attempts {
+		ch, err := p.ConnectToNetwork(ctx, "home-wifi", "wrongpassword")
+		if err != nil {
+			t.Fatalf("attempt %d: ConnectToNetwork: %v", i, err)
+		}
+		drain(t, ch)
+	}
+
+	if live := fake.LiveConns(); len(live) != 1 {
+		t.Fatalf("after %d connect attempts, live profiles = %v, want exactly 1", attempts, live)
+	}
+	if got := fake.DeletedConns(); len(got) != attempts-1 {
+		t.Fatalf("deleted %d station profiles, want %d (leaked: %v)", len(got), attempts-1, got)
 	}
 }

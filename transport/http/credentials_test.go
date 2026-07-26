@@ -44,6 +44,9 @@ func TestCredentialStateStatusCode(t *testing.T) {
 		wantStatus int
 		wantCode   string // "" means: no JSON error body expected
 		wantErrIs  error  // error the WithErrorHandler callback must receive; nil means none
+		// wantRedacted asserts the client is given a generic message and that
+		// submitErr's text appears nowhere in the response.
+		wantRedacted bool
 	}{
 		{
 			name:       "accepted",
@@ -99,13 +102,16 @@ func TestCredentialStateStatusCode(t *testing.T) {
 			wantErrIs:  provision.ErrPSKInvalid,
 		},
 		{
-			// Anything unrecognised is a server-side fault, not the client's.
-			name:       "unknown error",
-			body:       validBody,
-			submitErr:  errors.New("provisioner exploded"),
-			wantStatus: http.StatusInternalServerError,
-			wantCode:   "credentials_error",
-			wantErrIs:  nil, // asserted against submitErr below
+			// Anything unrecognised is a server-side fault, not the client's —
+			// and its text is not this package's to vouch for, so the client is
+			// told nothing about it. The cause still reaches the error handler.
+			name:         "unknown error",
+			body:         validBody,
+			submitErr:    errors.New("provisioner exploded"),
+			wantStatus:   http.StatusInternalServerError,
+			wantCode:     "credentials_error",
+			wantRedacted: true,
+			wantErrIs:    nil, // asserted against submitErr below
 		},
 		{
 			// Rejected during decode, before the Flow is ever consulted, so the
@@ -140,9 +146,17 @@ func TestCredentialStateStatusCode(t *testing.T) {
 				var body errorResponse
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body), "response body: %s", rec.Body.String())
 				assert.Equal(t, tc.wantCode, body.Code)
-				// The error text is passed through verbatim for operators; assert
-				// it carries the cause rather than pinning exact wording.
-				assert.Contains(t, body.Error, tc.submitErr.Error())
+				if tc.wantRedacted {
+					// An unrecognised error may carry backend detail, so the
+					// client must be told nothing about it.
+					assert.Equal(t, genericErrMsg, body.Error)
+					assert.NotContains(t, rec.Body.String(), tc.submitErr.Error())
+				} else {
+					// Recognised errors are this package's own sentinels, so
+					// their text is safe. Assert the cause is carried rather
+					// than pinning exact wording.
+					assert.Contains(t, body.Error, tc.submitErr.Error())
+				}
 			}
 
 			switch {

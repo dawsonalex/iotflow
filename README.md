@@ -173,8 +173,9 @@ channel. Call `Unsubscribe` to release one early.
 
 ```go
 type FlowUpdate struct {
-    State FlowState // see below
-    Err   error     // non-nil only when State == StateFailed
+    State  FlowState     // see below
+    Err    error         // raw backend error; non-nil on Failed and AttemptFailed
+    Reason FailureReason // classification of Err, safe to put on the wire
 }
 ```
 
@@ -183,8 +184,56 @@ type FlowUpdate struct {
 terminal states `Provisioned` or `Failed`. `Provisioned` means the device is on
 a network, whether it was already online at `Begin` or reached it through the
 full flow — a subscriber that needs to tell those apart can look at whether
-`EnablingAP` was ever emitted. `FlowUpdate` marshals to JSON as
-`{"state": "...", "error": "..."}` for transports that stream it.
+`EnablingAP` was ever emitted.
+
+### Recoverable failures
+
+Not every failure is terminal. If disabling AP mode or connecting to the target
+network fails, the `Flow` emits `AttemptFailed` and then returns to `EnablingAP`
+→ `WaitingForCredentials` so the user can submit again:
+
+```
+… → Connecting   → AttemptFailed → EnablingAP → WaitingForCredentials → …
+… → DisablingAP  → AttemptFailed → EnablingAP → WaitingForCredentials → …
+```
+
+`AttemptFailed` is the only non-terminal state that carries an error, and it is
+*emitted rather than occupied* — the update immediately after it names the state
+the machine actually moved to, so a client switching on state never has to
+handle it as a resting place. Use it to tell the user why the setup page came
+back rather than leaving them to guess:
+
+| `Reason`                 | JSON               | Means                                        |
+| ------------------------ | ------------------ | -------------------------------------------- |
+| `ReasonConnectFailed`    | `connect_failed`   | `ConnectToNetwork` failed — wrong PSK, wrong SSID, network out of range |
+| `ReasonAPTeardownFailed` | `ap_teardown_failed` | `DisableAPMode` failed — a device-side problem, but resubmitting is still worth a try |
+| `ReasonInternal`         | `internal`         | anything else, including every `Failed`       |
+
+Retries are unbounded but each one waits on a fresh credential submission, so
+this cannot spin: a client that never resubmits simply parks in
+`WaitingForCredentials`.
+
+### Error redaction
+
+`FlowUpdate` marshals to JSON as
+`{"state": "...", "reason": "...", "error": "..."}`. The `error` field is
+**`Reason.Message()`, never `Err.Error()`**.
+
+This is deliberate. The far end of a provisioning stream is an unauthenticated
+client sitting on the device's setup AP, and backend errors carry D-Bus object
+paths, interface names and NetworkManager internals. Because the redaction lives
+in `MarshalJSON` rather than in one transport, a custom BLE/MQTT/HTTP transport
+that marshals a `FlowUpdate` gets the safe encoding for free.
+
+Go consumers that want the underlying error read `Err` off the struct directly;
+`errors.Is` works as normal. That is the right channel for device logs.
+
+The same rule applies to the other endpoints in `transport/http`: `GET /networks`
+and `POST /credentials` report only errors this module defines itself. Anything
+unrecognised — which is where backend text would arrive — becomes a generic
+message, with the real error going to `WithErrorHandler`. **If you write your own
+transport, apply the same rule**: `MarshalJSON` protects `FlowUpdate`, but any
+error you surface yourself is yours to redact.
 
 ## API
 

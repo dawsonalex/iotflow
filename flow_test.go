@@ -2,6 +2,7 @@ package iotflow_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync/atomic"
 	"testing"
@@ -67,6 +68,19 @@ func stateSeq(updates []iotflow.FlowUpdate) []iotflow.FlowState {
 		states[i] = u.State
 	}
 	return states
+}
+
+// firstWithState returns the first update carrying state s. It lets a test
+// assert on an update's Err or Reason without pinning it to an index in the
+// expected sequence, which matters for the retry paths — those emit some states
+// more than once.
+func firstWithState(updates []iotflow.FlowUpdate, s iotflow.FlowState) (iotflow.FlowUpdate, bool) {
+	for _, u := range updates {
+		if u.State == s {
+			return u, true
+		}
+	}
+	return iotflow.FlowUpdate{}, false
 }
 
 // newTestFlow creates a Flow backed by p.
@@ -169,6 +183,7 @@ func TestBegin_RetryOnConnectionFailure(t *testing.T) {
 	assert.NoError(t, f.Submit(testNetSSID, testNetPSK))
 
 	assert.NoError(t, waitFor(t, beginErr, "Begin to return"))
+	updates := waitFor(t, results, "the update stream to close")
 	assert.Equal(t, []iotflow.FlowState{
 		iotflow.StateIdle,
 		iotflow.StateCheckingConnection,
@@ -176,12 +191,20 @@ func TestBegin_RetryOnConnectionFailure(t *testing.T) {
 		iotflow.StateWaitingForCredentials,
 		iotflow.StateDisablingAP,
 		iotflow.StateConnecting,
-		iotflow.StateEnablingAP, // retry loop
+		iotflow.StateAttemptFailed, // wrong PSK; recovering
+		iotflow.StateEnablingAP,    // retry loop
 		iotflow.StateWaitingForCredentials,
 		iotflow.StateDisablingAP,
 		iotflow.StateConnecting,
 		iotflow.StateProvisioned,
-	}, stateSeq(waitFor(t, results, "the update stream to close")))
+	}, stateSeq(updates))
+
+	// The failure must be attributable: without this a client cannot tell the
+	// user their password was wrong, which is the whole point of the state.
+	failed, ok := firstWithState(updates, iotflow.StateAttemptFailed)
+	assert.True(t, ok, "no StateAttemptFailed update")
+	assert.ErrorIs(t, failed.Err, connErr)
+	assert.Equal(t, iotflow.ReasonConnectFailed, failed.Reason)
 }
 
 // --- Begin: error paths ---
@@ -224,20 +247,34 @@ func TestBegin_EnableAPModeError(t *testing.T) {
 	assert.Equal(t, []iotflow.FlowState{iotflow.StateIdle, iotflow.StateCheckingConnection, iotflow.StateEnablingAP, iotflow.StateFailed}, stateSeq(updates))
 }
 
+// TestBegin_DisableAPModeError tests the flow of state when an error occurs during the DisableAPMode() step
+// (e.g. after credentials have been submitted). The failure is not terminal, so the second submission is
+// what makes the recovery observable: without it the Flow parks on credsCh and the stream never closes.
 func TestBegin_DisableAPModeError(t *testing.T) {
 	backendErr := errors.New("cannot deactivate")
+	var disableApModeCalls atomic.Int32
+
 	f := newTestFlow(t, &iotflowtest.MockProvisioner{
 		IsConnectedFn: func(_ context.Context) (bool, error) { return false, nil },
 		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan provision.Update, error) {
 			return iotflowtest.ConnectedCh(), nil
 		},
-		DisableAPModeFn: func(_ context.Context) error { return backendErr },
+		DisableAPModeFn: func(_ context.Context) error {
+			// Return an error for the first call, allow subsequent calls to run.
+			if disableApModeCalls.Add(1) == 1 {
+				return backendErr
+			}
+			return nil
+		},
+		ConnectToNetworkFn: func(_ context.Context, _, _ string) (<-chan provision.Update, error) {
+			return iotflowtest.ConnectedCh(), nil
+		},
 	})
 
 	ch, unsub := f.Subscribe()
 	defer unsub()
 
-	results, waiting := watchUpdates(t, ch, iotflow.StateWaitingForCredentials)
+	allResultsCh, waiting := watchUpdates(t, ch, iotflow.StateWaitingForCredentials)
 
 	beginErr := make(chan error, 1)
 	go func() { beginErr <- f.Begin(t.Context()) }()
@@ -245,19 +282,37 @@ func TestBegin_DisableAPModeError(t *testing.T) {
 	waitFor(t, waiting, "StateWaitingForCredentials")
 	assert.NoError(t, f.Submit(testNetSSID, testNetPSK))
 
-	err := waitFor(t, beginErr, "Begin to return")
-	assert.ErrorIs(t, err, backendErr)
+	// second credential submission due to our first DisableApMode failure
+	waitFor(t, waiting, "StateWaitingForCredentials")
+	assert.NoError(t, f.Submit(testNetSSID, testNetPSK))
 
-	updates := waitFor(t, results, "the update stream to close")
+	assert.NoError(t, waitFor(t, beginErr, "Begin to return"))
+	allResults := waitFor(t, allResultsCh, "the update stream to close")
 	assert.Equal(t, []iotflow.FlowState{
+		// Standard flow to set up AP mode
 		iotflow.StateIdle,
 		iotflow.StateCheckingConnection,
 		iotflow.StateEnablingAP,
 		iotflow.StateWaitingForCredentials,
+
+		// Accept credentials, but there's an error disabling the AP
 		iotflow.StateDisablingAP,
-		iotflow.StateFailed,
-	}, stateSeq(updates))
-	assert.ErrorIs(t, updates[len(updates)-1].Err, backendErr)
+		iotflow.StateAttemptFailed,
+		iotflow.StateEnablingAP,
+		iotflow.StateWaitingForCredentials,
+
+		// Credentials re-sent by the client, disabling AP mode and connection succeeds.
+		iotflow.StateDisablingAP,
+		iotflow.StateConnecting,
+		iotflow.StateProvisioned,
+	}, stateSeq(allResults))
+
+	// assert that the StateAttemptFailed event comes with the error, and is
+	// classified as a teardown problem rather than a bad-credentials one.
+	failed, ok := firstWithState(allResults, iotflow.StateAttemptFailed)
+	assert.True(t, ok, "no StateAttemptFailed update")
+	assert.ErrorIs(t, failed.Err, backendErr)
+	assert.Equal(t, iotflow.ReasonAPTeardownFailed, failed.Reason)
 }
 
 func TestBegin_ContextCancelledWhileWaiting(t *testing.T) {
@@ -497,6 +552,7 @@ func TestBegin_RetryOnConnectError(t *testing.T) {
 	assert.NoError(t, f.Submit(testNetSSID, testNetPSK))
 
 	assert.NoError(t, waitFor(t, beginErr, "Begin to return"))
+	updates := waitFor(t, results, "the update stream to close")
 	assert.Equal(t, []iotflow.FlowState{
 		iotflow.StateIdle,
 		iotflow.StateCheckingConnection,
@@ -504,12 +560,18 @@ func TestBegin_RetryOnConnectError(t *testing.T) {
 		iotflow.StateWaitingForCredentials,
 		iotflow.StateDisablingAP,
 		iotflow.StateConnecting,
-		iotflow.StateEnablingAP, // retry loop
+		iotflow.StateAttemptFailed, // activation failed; recovering
+		iotflow.StateEnablingAP,    // retry loop
 		iotflow.StateWaitingForCredentials,
 		iotflow.StateDisablingAP,
 		iotflow.StateConnecting,
 		iotflow.StateProvisioned,
-	}, stateSeq(waitFor(t, results, "the update stream to close")))
+	}, stateSeq(updates))
+
+	failed, ok := firstWithState(updates, iotflow.StateAttemptFailed)
+	assert.True(t, ok, "no StateAttemptFailed update")
+	assert.ErrorIs(t, failed.Err, connErr)
+	assert.Equal(t, iotflow.ReasonConnectFailed, failed.Reason)
 }
 
 // TestBegin_ContextCancelledDuringConnect covers cancellation on the synchronous
@@ -642,4 +704,162 @@ func TestBegin_DropsStaleCredentialsOnRetry(t *testing.T) {
 	assert.NoError(t, waitFor(t, beginErr, "Begin to return"))
 	assert.Equal(t, "fresh-net", secondConnectSSID,
 		"retry must use the freshly submitted credential, not the stale mid-connect one")
+}
+
+// --- Wire encoding ---
+
+// TestFlowUpdateMarshalJSONRedactsError pins the boundary between what the Flow
+// knows and what a client is told. Err holds the backend's own error text —
+// D-Bus object paths, interface names, NetworkManager internals — and the far
+// end of the SSE stream is an unauthenticated client sitting on the setup AP.
+// The encoded form must carry the classification instead, never the raw text.
+func TestFlowUpdateMarshalJSONRedactsError(t *testing.T) {
+	// A realistically leaky backend error.
+	rawErr := errors.New(`dbus: org.freedesktop.NetworkManager.Device.Error: ` +
+		`/org/freedesktop/NetworkManager/Devices/3 refused Deactivate for uuid 9f2c`)
+
+	tests := []struct {
+		name       string
+		update     iotflow.FlowUpdate
+		wantState  string
+		wantReason string
+		wantErrMsg string
+	}{
+		{
+			name:      "clean update carries no error fields",
+			update:    iotflow.FlowUpdate{State: iotflow.StateWaitingForCredentials},
+			wantState: "WaitingForCredentials",
+		},
+		{
+			name: "connect failure is attributable",
+			update: iotflow.FlowUpdate{
+				State: iotflow.StateAttemptFailed, Err: rawErr, Reason: iotflow.ReasonConnectFailed,
+			},
+			wantState:  "AttemptFailed",
+			wantReason: "connect_failed",
+			wantErrMsg: iotflow.ReasonConnectFailed.Message(),
+		},
+		{
+			name: "teardown failure is distinguishable from a bad password",
+			update: iotflow.FlowUpdate{
+				State: iotflow.StateAttemptFailed, Err: rawErr, Reason: iotflow.ReasonAPTeardownFailed,
+			},
+			wantState:  "AttemptFailed",
+			wantReason: "ap_teardown_failed",
+			wantErrMsg: iotflow.ReasonAPTeardownFailed.Message(),
+		},
+		{
+			name:       "unclassified error still reports generically",
+			update:     iotflow.FlowUpdate{State: iotflow.StateFailed, Err: rawErr},
+			wantState:  "Failed",
+			wantReason: "internal",
+			wantErrMsg: iotflow.ReasonInternal.Message(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b, err := json.Marshal(tt.update)
+			assert.NoError(t, err)
+
+			var got struct {
+				State  string `json:"state"`
+				Reason string `json:"reason"`
+				Error  string `json:"error"`
+			}
+			assert.NoError(t, json.Unmarshal(b, &got))
+			assert.Equal(t, tt.wantState, got.State)
+			assert.Equal(t, tt.wantReason, got.Reason)
+			assert.Equal(t, tt.wantErrMsg, got.Error)
+
+			// The payload must not contain the backend's text under any key.
+			assert.NotContains(t, string(b), "dbus")
+			assert.NotContains(t, string(b), "NetworkManager")
+			assert.NotContains(t, string(b), "9f2c")
+		})
+	}
+}
+
+// TestFlowStateStringRoundTrip guards the String() switch. A missing case falls
+// through to "Unknown", which reaches the wire silently — every state the Flow
+// can emit must render as itself.
+func TestFlowStateStringRoundTrip(t *testing.T) {
+	states := []iotflow.FlowState{
+		iotflow.StateIdle, iotflow.StateCheckingConnection, iotflow.StateEnablingAP,
+		iotflow.StateWaitingForCredentials, iotflow.StateDisablingAP, iotflow.StateConnecting,
+		iotflow.StateProvisioned, iotflow.StateFailed, iotflow.StateAttemptFailed,
+	}
+	seen := make(map[string]iotflow.FlowState, len(states))
+	for _, s := range states {
+		got := s.String()
+		assert.NotEqual(t, "Unknown", got, "state %d has no String() case", s)
+		if prev, dup := seen[got]; dup {
+			t.Fatalf("states %d and %d both render as %q", prev, s, got)
+		}
+		seen[got] = s
+	}
+}
+
+// TestSubscribeReplaysUnresolvedFailure covers the subscriber that arrives
+// *after* a recovery. StateAttemptFailed is emit-only, so it is overwritten in
+// lastStateUpdate almost immediately — and this is the normal case rather than
+// an edge case, because re-entering AP mode bounces the radio the client is
+// connected over, dropping and reconnecting its stream. Without a replay such a
+// client is returned to the setup page with no idea why.
+func TestSubscribeReplaysUnresolvedFailure(t *testing.T) {
+	connErr := errors.New("authentication failed")
+	var callCount atomic.Int32
+	secondAttempt := make(chan struct{})
+
+	f := newTestFlow(t, &iotflowtest.MockProvisioner{
+		IsConnectedFn: func(_ context.Context) (bool, error) { return false, nil },
+		EnableAPModeFn: func(_ context.Context, _, _ string) (<-chan provision.Update, error) {
+			return iotflowtest.ConnectedCh(), nil
+		},
+		ConnectToNetworkFn: func(_ context.Context, _, _ string) (<-chan provision.Update, error) {
+			if callCount.Add(1) == 1 {
+				return iotflowtest.FailedCh(connErr), nil
+			}
+			<-secondAttempt // hold the Flow so the assertions below are stable
+			return iotflowtest.ConnectedCh(), nil
+		},
+	})
+
+	first, unsubFirst := f.Subscribe()
+	_, waiting := watchUpdates(t, first, iotflow.StateWaitingForCredentials)
+
+	beginErr := make(chan error, 1)
+	go func() { beginErr <- f.Begin(t.Context()) }()
+
+	waitFor(t, waiting, "StateWaitingForCredentials")
+	assert.NoError(t, f.Submit(testNetSSID, "wrongpass1"))
+
+	// The connect fails and the Flow recovers to StateWaitingForCredentials.
+	waitFor(t, waiting, "StateWaitingForCredentials after the failure")
+	unsubFirst() // the client's stream drops when the AP bounces
+
+	// A fresh subscription, standing in for the browser's SSE reconnect.
+	second, unsubSecond := f.Subscribe()
+	defer unsubSecond()
+
+	failed := waitFor(t, second, "the replayed failure")
+	assert.Equal(t, iotflow.StateAttemptFailed, failed.State,
+		"a reconnecting client must be told why it is being asked again")
+	assert.ErrorIs(t, failed.Err, connErr)
+	assert.Equal(t, iotflow.ReasonConnectFailed, failed.Reason)
+
+	current := waitFor(t, second, "the current state")
+	assert.Equal(t, iotflow.StateWaitingForCredentials, current.State,
+		"the replayed failure must be followed by the live state, in emit order")
+
+	// Once provisioning succeeds the failure is resolved and must not be
+	// replayed to anyone joining afterwards.
+	assert.NoError(t, f.Submit(testNetSSID, testNetPSK))
+	close(secondAttempt)
+	assert.NoError(t, waitFor(t, beginErr, "Begin to return"))
+
+	third, _ := f.Subscribe()
+	last := waitFor(t, third, "the terminal state")
+	assert.Equal(t, iotflow.StateProvisioned, last.State,
+		"a subscriber joining after success must not be shown a stale failure")
 }

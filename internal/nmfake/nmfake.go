@@ -2,6 +2,7 @@ package nmfake
 
 import (
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -10,13 +11,15 @@ import (
 )
 
 const (
-	busName    = "org.freedesktop.NetworkManager"
-	objectPath = "/org/freedesktop/NetworkManager"
+	busName      = "org.freedesktop.NetworkManager"
+	objectPath   = "/org/freedesktop/NetworkManager"
+	settingsPath = objectPath + "/Settings"
 
 	ifaceManager  = "org.freedesktop.NetworkManager"
 	ifaceDevice   = "org.freedesktop.NetworkManager.Device"
 	ifaceWireless = "org.freedesktop.NetworkManager.Device.Wireless"
 	ifaceAP       = "org.freedesktop.NetworkManager.AccessPoint"
+	ifaceConn     = "org.freedesktop.NetworkManager.Settings.Connection"
 
 	// errScanNotAllowed is the D-Bus error NetworkManager returns for a
 	// rate-limited scan; the provisioner treats it as "use the cached list".
@@ -93,6 +96,8 @@ type NM struct {
 	lastAddSettings map[string]map[string]dbus.Variant
 	addCalls        int
 	deactivateCalls int
+	liveConns       map[dbus.ObjectPath]bool // profiles added and not yet deleted
+	deletedConns    []dbus.ObjectPath
 }
 
 type device struct {
@@ -115,6 +120,15 @@ func Start(addr string) (*NM, func(), error) {
 	if err := conn.Export(managerHandler{nm}, objectPath, ifaceManager); err != nil {
 		_ = conn.Close()
 		return nil, nil, fmt.Errorf("exporting manager object: %w", err)
+	}
+
+	// Connection profiles are created on demand by AddAndActivateConnection, so
+	// their paths aren't known up front. A subtree export covers every
+	// .../Settings/N at once; the handler recovers which one was called from the
+	// message context.
+	if err := conn.ExportSubtree(connectionHandler{nm}, settingsPath, ifaceConn); err != nil {
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("exporting settings subtree: %w", err)
 	}
 
 	reply, err := conn.RequestName(busName, dbus.NameFlagDoNotQueue)
@@ -146,6 +160,8 @@ func (nm *NM) Reset() {
 	nm.lastAddSettings = nil
 	nm.addCalls = 0
 	nm.deactivateCalls = 0
+	nm.liveConns = nil
+	nm.deletedConns = nil
 }
 
 // AddWiFiDevice registers a WiFi device in the Disconnected state and returns
@@ -285,6 +301,15 @@ func (nm *NM) DeactivateCalls() int {
 	return nm.deactivateCalls
 }
 
+// DeletedConns returns the connection profile paths that have been Deleted, in
+// call order. A profile that is activated but never deleted is a leak: it
+// persists in NetworkManager's configuration across reboots.
+func (nm *NM) DeletedConns() []dbus.ObjectPath {
+	nm.mu.Lock()
+	defer nm.mu.Unlock()
+	return append([]dbus.ObjectPath(nil), nm.deletedConns...)
+}
+
 func (nm *NM) device(path dbus.ObjectPath) *device {
 	nm.mu.Lock()
 	defer nm.mu.Unlock()
@@ -337,6 +362,10 @@ func (h managerHandler) AddAndActivateConnection(
 	h.nm.nextActID++
 	actPath := dbus.ObjectPath(fmt.Sprintf("%s/ActiveConnection/%d", objectPath, h.nm.nextActID))
 	connPath := dbus.ObjectPath(fmt.Sprintf("%s/Settings/%d", objectPath, h.nm.nextActID))
+	if h.nm.liveConns == nil {
+		h.nm.liveConns = make(map[dbus.ObjectPath]bool)
+	}
+	h.nm.liveConns[connPath] = true
 	// AP and station activations get independent outcomes so a scripted station
 	// failure doesn't also fail the AP re-entry the provisioner does on retry.
 	src := h.nm.activateScript
@@ -380,6 +409,45 @@ func (h managerHandler) DeactivateConnection(_ dbus.ObjectPath) *dbus.Error {
 	defer h.nm.mu.Unlock()
 	h.nm.deactivateCalls++
 	return nil
+}
+
+// connectionHandler exports org.freedesktop.NetworkManager.Settings.Connection
+// over the whole .../Settings subtree.
+type connectionHandler struct{ nm *NM }
+
+// Delete removes a connection profile. The dbus.Message argument carries the
+// object path the call was addressed to, which is how the handler knows which
+// profile was deleted under a subtree export.
+//
+// Deleting a path that was never added, or that was already deleted, is an
+// error rather than a silent success. Real NetworkManager behaves this way, and
+// without it a test asserting on the number of deletes cannot distinguish a
+// genuine cleanup from a provisioner repeatedly deleting one stale path.
+func (h connectionHandler) Delete(msg dbus.Message) *dbus.Error {
+	path, _ := msg.Headers[dbus.FieldPath].Value().(dbus.ObjectPath)
+	h.nm.mu.Lock()
+	defer h.nm.mu.Unlock()
+	if !h.nm.liveConns[path] {
+		return dbus.NewError("org.freedesktop.NetworkManager.Settings.Connection.UnknownConnection",
+			[]interface{}{fmt.Sprintf("no such connection profile %q", path)})
+	}
+	delete(h.nm.liveConns, path)
+	h.nm.deletedConns = append(h.nm.deletedConns, path)
+	return nil
+}
+
+// LiveConns returns the connection profiles that have been added and not
+// deleted, sorted for stable comparison. Anything left here at the end of a
+// provisioning run is persisted NetworkManager configuration.
+func (nm *NM) LiveConns() []dbus.ObjectPath {
+	nm.mu.Lock()
+	defer nm.mu.Unlock()
+	out := make([]dbus.ObjectPath, 0, len(nm.liveConns))
+	for p := range nm.liveConns {
+		out = append(out, p)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // wirelessHandler exports RequestScan for a single device path.

@@ -76,9 +76,12 @@ func getDeviceState(conn *dbus.Conn, devicePath dbus.ObjectPath) (deviceState, e
 // TODO: This could become a struct that contains specific values, which could be serialised to the variant map.
 type connectionSettings map[string]map[string]dbus.Variant
 
-func (b *Provisioner) addAndActivateConnection(settings connectionSettings) (dbus.ObjectPath, error) {
-	var activeConn, connPath dbus.ObjectPath
-
+// addAndActivateConnection adds a new connection profile and activates it,
+// returning the active-connection path and the profile's settings path. Both
+// matter: the first is what DeactivateConnection takes, the second is what
+// Delete takes. A caller that keeps only the first can activate a profile it
+// can never remove, and NetworkManager persists profiles across reboots.
+func (b *Provisioner) addAndActivateConnection(settings connectionSettings) (activeConn, connPath dbus.ObjectPath, err error) {
 	call := b.conn.Object(nmBusName, nmObjectPath).Call(
 		"org.freedesktop.NetworkManager.AddAndActivateConnection",
 		0,
@@ -87,11 +90,24 @@ func (b *Provisioner) addAndActivateConnection(settings connectionSettings) (dbu
 		dbus.ObjectPath("/"),
 	)
 	if call.Err != nil {
-		return "", call.Err
+		return "", "", call.Err
 	}
 
 	if err := call.Store(&activeConn, &connPath); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return activeConn, nil
+	return activeConn, connPath, nil
+}
+
+// deleteConnection removes a connection profile from NetworkManager's
+// configuration. Deleting an active profile also deactivates it. An empty path
+// is a no-op: dbus.Object accepts one and the call would go somewhere
+// unintended rather than failing cleanly.
+func (b *Provisioner) deleteConnection(path dbus.ObjectPath) error {
+	if path == "" {
+		return nil
+	}
+	return b.conn.Object(nmBusName, path).Call(
+		"org.freedesktop.NetworkManager.Settings.Connection.Delete", 0,
+	).Err
 }

@@ -59,18 +59,25 @@ func (h *handler) handlePostCredentials() http.HandlerFunc {
 
 		err := h.flow.Submit(reqBody.SSID, reqBody.PSK)
 		if err != nil {
-			errRes := errorResponse{Code: "credentials_error", Error: err.Error()}
+			// Only errors this handler recognises are described to the client;
+			// those are this module's own sentinels, so their text is known-safe.
+			// An unrecognised error came from somewhere further down and may
+			// carry backend detail, so it is logged and reported generically.
+			errRes := errorResponse{Code: "credentials_error", Error: genericErrMsg}
 			statusCode := http.StatusInternalServerError
 
 			switch {
 			case errors.Is(err, iotflow.ErrNotAwaitingCredentials):
 				errRes.Code = "ErrNotAwaitingCredentials"
+				errRes.Error = err.Error()
 				statusCode = http.StatusConflict
 			case errors.Is(err, iotflow.ErrSubmissionPending):
 				errRes.Code = "ErrSubmissionPending"
+				errRes.Error = err.Error()
 				statusCode = http.StatusConflict
 			case errors.Is(err, provision.ErrSSIDInvalid), errors.Is(err, provision.ErrPSKInvalid):
 				errRes.Code = "ErrInvalidCredentials"
+				errRes.Error = err.Error()
 				statusCode = http.StatusBadRequest
 			}
 
@@ -100,6 +107,13 @@ func (h *handler) handleGetEvents() http.HandlerFunc {
 	}
 }
 
+// genericErrMsg is what a client is told when the underlying error is not one
+// this package produced itself. Provisioning endpoints are served to an
+// unauthenticated client on the device's setup AP, so backend error text —
+// D-Bus object paths, interface names, NetworkManager internals — must not
+// reach the response body. It goes to the configured error handler instead.
+const genericErrMsg = "the device hit an internal error"
+
 type networkResponse struct {
 	Networks []provision.Network `json:"networks"`
 }
@@ -108,13 +122,17 @@ func (h *handler) handleGetAps() http.HandlerFunc {
 	return func(rw http.ResponseWriter, r *http.Request) {
 		aps, err := h.flow.ListAccessPoints(r.Context())
 		if err != nil {
-			http.Error(rw, err.Error(), http.StatusInternalServerError)
+			// ListAccessPoints wraps the provisioner's error, so err carries
+			// D-Bus text. Same audience as the event stream — an unauthenticated
+			// client on the setup AP — so it goes to the error handler, not the
+			// response body.
+			http.Error(rw, genericErrMsg, http.StatusInternalServerError)
 			h.handleErr(r, err)
 			return
 		}
 		resp := networkResponse{Networks: aps}
 		if err := json.NewEncoder(rw).Encode(resp); err != nil {
-			http.Error(rw, err.Error(), http.StatusInternalServerError)
+			http.Error(rw, genericErrMsg, http.StatusInternalServerError)
 			h.handleErr(r, err)
 		}
 	}
