@@ -1,1 +1,4 @@
 /.claude/
+
+# Development tools built from tools/go.mod by `make install-tools`.
+/bin/
