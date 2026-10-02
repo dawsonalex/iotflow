@@ -43,12 +43,3 @@ test-integration-docker: ## Run the integration tests in a container (for hosts 
 	@docker build -f Dockerfile.integration -t '${INTEGRATION_IMAGE}' .
 	@echo "Running integration tests in container..."
 	@docker run --rm '${INTEGRATION_IMAGE}'
-
-build: ## Build the binary
-	go build -C '${ROOT_DIR}cmd/example' -o '${ROOT_DIR}${BIN_NAME}'
-
-run: build ## Build and run the binary bin/imageservice
-	${ROOT_DIR}/${BIN_NAME}
-
-clean: ## remove build files
-	rm -rv '${ROOT_DIR}${BIN_NAME}'
